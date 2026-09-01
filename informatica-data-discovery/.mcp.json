@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cdgc-catalog-discovery": {
+      "type": "http",
+      "url": ""
+    }
+  }
+}

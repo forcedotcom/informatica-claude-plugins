@@ -1,0 +1,8 @@
+{
+  "name": "informatica-data-discovery",
+  "version": "1.0.0",
+  "description": "Claude Code plugin for Informatica IDMC data discovery, with CDGC catalog-search and AI-readiness-assessment skills (Claire integration not yet wired up).",
+  "author": {
+    "name": "rthiruvasagam"
+  }
+}
