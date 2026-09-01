@@ -23,5 +23,5 @@ Do not implement business logic against real CDGC/Claire APIs without explicit d
 
 ## Skills
 
-- `skills/catalog-discovery/SKILL.md` — real, substantive guidance for CDGC catalog discovery (search-then-hierarchy workflow, certification/trust rules, glossary probing). Not a placeholder.
+- `skills/catalog-discovery/SKILL.md` — real, substantive guidance for CDGC catalog discovery (intent-driven workflow covering discovery, trust/reliability, sensitivity, policy, safe-usage, and compliance flags). Not a placeholder.
 - `skills/cdgc-ai-ready-data-assessemt/` — real skill that runs a full CDGC-connected AI-Ready Data Assessment across ten measures (coverage, freshness SLA, metadata completeness, policy coverage, unstructured index, classification, data quality, golden-record match rate, glossary coverage, lineage coverage) in one pass, then renders a self-contained HTML scorecard to `artifacts/` (not committed). Backed by `references/*.md` (query logic, formulas, status rules, JSON payload shape) and `assets/report-template.html`. Overall status is always the weakest measure, never an average.

@@ -1,209 +1,449 @@
 ---
 name: catalog-discovery
-description: "Discover data assets in the CDGC catalog and assemble tenant-specific context (business glossaries, data classifications, stakeholders, ratings, certification) BEFORE reading any actual data through other MCPs. Use this skill whenever the user asks a data question — 'find', 'where is', 'show me', 'what tables have', 'is there a report on', 'who owns', 'what does column X mean', 'give me customer data', etc. Applies to both business assets (domains, glossaries, policies) and technical assets (tables, columns, files, dashboards)."
-version: 1.3.0
+description: "Discover data assets in the CDGC catalog and assemble tenant-specific context (business glossaries, data classifications, stakeholders, ratings, certification, policies, sensitivity, compliance flags) BEFORE reading any actual data through other MCPs. Use this skill whenever the user asks a data question — 'find', 'where is', 'show me', 'what tables have', 'is there a report on', 'who owns', 'what does column X mean', 'give me customer data', 'is this sensitive', 'what policy applies', 'can I safely use', etc. Applies to both business assets (domains, glossaries, policies) and technical assets (tables, columns, files, dashboards)."
+version: 2.4.2
 ---
 
-# Catalog Discovery
+# Catalog Discovery v2.4.2 — Intent-Driven Trusted Data Discovery
 
-The CDGC catalog is the authoritative index of what data exists in this tenant, what it means to *this* organization, who owns it, and how trustworthy it is. **Always start here.** Only after the catalog has narrowed the answer to a specific asset (or short list) should another MCP be used to read the underlying data.
-
-## Core Principles
-
-1. **Catalog-first, data-second.** Never query a database, warehouse, S3, or BI MCP directly from a cold user prompt. The catalog tells you which asset is the right one, whether it is certified, who the steward is, and what its tenant-specific meaning is. Reading raw data before doing that risks pulling the wrong table, an uncertified copy, or data the user is not entitled to interpret.
-2. **Prefer tenant context over generic knowledge.** If a business glossary term, classification, or stakeholder note exists in *this* catalog, that definition wins over any generic definition the model knows. "Customer", "Revenue", "PII", "Active Account", "last quarter" all mean whatever the tenant's stewards say they mean.
-3. **Trust signals matter — but only datasets carry certification.** A `certified: true` asset has been vetted by stewards. `averageRating` runs 1–5; higher is better. When multiple candidates match, rank by certification first, then rating, then recency (`modifiedOn`).
-
-   **Certification lands only on dataset-grain assets** — tables, views, files, BI datasets and reports, SaaS objects. Business terms, domains, policies, columns and other `DataElement`s are **never** certified, whatever their quality. So `certified: false` on a glossary term is not a defect and not a reason to distrust it; for those assets the trust signal is `assetLifecycle` (`Published` > `Draft`) plus the stakeholder who authored it. Never downgrade a term, or omit it from your answer, because it is uncertified.
-4. **Read your own aggregations before querying again.** Every search returns `resourceAgg` / `byType` / `originAgg` buckets. These are not decoration — they are the routing table for your next call. Issuing another broad search without reading them is the single most common way to waste a turn.
-5. **Session context is a hint, not a filter.** A connected device's name, an already-loaded connector, or last turn's topic is a reason to *also* look somewhere — never a reason to filter to *only* there. Let the aggregations, certification and rating tell you which system holds the trustworthy asset.
-
-## The Two Discovery Tools
-
-| Tool | Purpose |
-|---|---|
-| `search_assets` | Find assets by keyword, with structured filters and aggregations. **Bounded and cheap** (`size` caps the response) but **ranked and partial** — a better-named asset can be buried below the fold. |
-| `get_asset_details` | Fetch full detail for one asset by identity, with selectable segments: `summary`, `selfAttributes`, `stakeholdership`, `dataClassification`, `glossary`, `hierarchy`, `neighbourhood`. **Complete and unranked** for what it returns, but **unbounded** — no `size` parameter. |
-
-Understanding that trade-off is most of the skill. Search chooses a neighbourhood; `hierarchy` exhausts one.
-
-### Mode selection
-
-**Use KEYWORD. Effectively always.** It supports `filterSpec`, `aggregationSpec` and `sortSpec`, and it is predictable.
-
-**NL mode is a last resort**, for a genuine zero-result retry on a conceptual question. It is unreliable in practice: it drifts semantically (a query about revenue *regions* can return weather-forecast tables matching on "forecast"/"region"), and **it fails outright on structural queries** — "show columns from table X", "what is the parent of Y" can return a server error rather than results. Structural traversal is `get_asset_details` + `hierarchy`, never NL.
-
-## Asset Taxonomy (quick reference)
-
-- **Glossary** — `Domain`, `SubDomain`, `BusinessTerm`, `Metric`. The tenant's business vocabulary.
-- **Data Catalog (Technical)** — `Resource → DataSource (DB/Schema) → Dataset (Table/View) → DataElement (Column)`, plus files, procedures, keys. Filter with `resourceType` (Oracle, Snowflake, Postgres, …).
-- **System & Data Set** — business-friendly wrappers over technical infrastructure.
-- **Process, Policy, Project** — governance context.
-- **AI** — `AIModel`, `AISystem`.
-- **Business Area, Legal Entity, Geography, Regulation** — organizational scope.
+The CDGC catalog is the authoritative index of what data exists, what it means to *this* organization, who owns it, and how trustworthy it is. This skill discovers, validates, assesses, traces, and reports gaps — grounded exclusively in catalog metadata.
 
 ---
 
-## Discovery Workflow
+## 1. Core Principles
 
-### Step 1 — Decompose, and include the compound phrase
+1. **Catalog-first.** Never query a database directly from a cold prompt. The catalog tells you which asset is right.
+2. **Tenant context wins.** Glossary terms in *this* catalog override generic definitions.
+3. **Certification is dataset-only.** `certified: true` = steward-vetted. Business terms/domains/policies use `assetLifecycle` (`Published` > `Draft`).
+4. **Read aggregations first.** Every search returns buckets — use them to route the next call.
+5. **Gaps are findings.** Missing description, absent owner, no glossary term — report these explicitly.
+6. **Zero hallucination.** Every claim cites a tool response or the absence of expected data.
+7. **Minimize calls.** Batch segments. Cap at 3–5 calls per strategy unless user asks for more.
 
-Break the request into probes. Each noun that could be a business concept, a physical dataset, an owner, a system, or a policy is a candidate probe.
+---
 
-**Critically: also probe the compound phrase, not just its parts.** Tenant assets are frequently named after the *combined* concept. Searching "customer" and "revenue" as separate glossary probes will not surface a view named `V_CUSTOMER_COMMERCE_METRICS`. Run at least one search on the compound phrase (or close synonyms — "commerce metrics", "revenue per customer") against the whole catalog with no `classType` restriction.
+## 2. Model Tiering
 
-**Identify discriminating vs. dimensional terms.** In "customer revenue for EMEA last quarter", *revenue* and *customer* discriminate; *EMEA* and *last quarter* are dimensions of the answer — they will be a column value and a date filter, not an asset name. Searching hard on a dimensional term burns calls. Probe it once, cheaply, then move on.
+| Tier | Use For |
+|------|---------|
+| **Main context** (Opus/Sonnet) | Intent classification, synthesis, trust scoring, root-cause, final answer |
+| **tools-haiku** (delegate) | Single search/details calls with known parameters |
+| **tools-sonnet** (delegate) | Multi-step chains requiring interpretation between steps |
 
-### Step 2 — Open with a trust census
+**Rules:** Delegate only when params are fully determined (haiku) or multi-step reasoning is needed (sonnet). Never delegate classification, synthesis, or final answers. Skip delegation on short conversations (1–2 turns, 1–2 calls).
 
-Run **one** call to size the trusted set, and aggregate on `classType` while you are there:
+---
 
-```json
-{ "query": "*", "mode": "KEYWORD", "filterSpec": { "certified": true }, "size": 1,
-  "aggregationSpec": [{ "name": "agg", "attributeNames": ["core.classType"] }] }
+## 3. Anti-Hallucination Protocol (absolute rules)
+
+1. NEVER state a field value not returned by a tool call.
+2. NEVER invent glossary definitions — say "no business definition exists in the catalog."
+3. NEVER assume relationships — say "no declared key relationship found."
+4. NEVER claim ownership — say "no governance owner is assigned."
+5. Distinguish declared (FK/PK — visible in hierarchy AND as a `core.PKFK` edge in neighbourhood) from inferred (RelatedTo in neighbourhood).
+6. When confidence is low, say "Based on available catalog metadata..."
+7. Absence is evidence — report it as a finding.
+8. NEVER upgrade a verdict based on column-name intuition. "RATING sounds like a rating" is NOT evidence. Only glossary terms, business names, and descriptions FROM the tool response constitute governed metadata — and even then, a description alone does NOT equal a glossary term.
+9. NEVER soften an AMBIGUOUS or UNDOCUMENTED verdict with reassurance like "but you can probably rely on it" or "Yes as the [X]." The verdict IS the answer — do not undermine it.
+10. A description matching the column name does NOT substitute for a glossary term. Description = documentation (may be informal/unreviewed). Glossary term = steward-curated governed meaning. They are different trust levels. No glossary term = UNDOCUMENTED regardless of how clear the description appears.
+
+---
+
+## 4. Tools & Segments
+
+**Discovery:** `search_assets` (query, mode, filterSpec, aggregationSpec, sortSpec, size, from) | `get_asset_details` (assetIdentity, segments[], identityType)
+
+**Enrichment (confirm with user first):** `update_asset_business_metadata` | `edit_data_asset_business_glossaries` | `edit_data_asset_data_classifications` | `edit_asset_certification` | `edit_asset_rating`
+
+### Segments
+
+| Segment | Returns | Use For |
+|---------|---------|---------|
+| `summary` (default) | identity, name, classType, description, certified, rating, lifecycle, timestamps, stakeholders, path | Overview, comparison, freshness |
+| `selfAttributes` | sourceStatementText, NumberOfRows, custom attrs, businessName | SQL logic, profiling, documentation check |
+| `stakeholdership` | Full stakeholder list with roles | Ownership |
+| `glossary` | Linked terms with curationStatus | Meaning, mismatch detection |
+| `hierarchy` | Children: columns, PK, FK, indexes | Field listing, joins |
+| `neighbourhood` | Associations: declared PK/FK table-to-table joins (`PkFkRelatedDataSets`, `ForeignKeyChildDataSet` — kind `core.PKFK`), glossary links, DQ rules, RelatedTo. EXCLUDES: ParentChild, DataFlow, ClassifiedAs | Cross-asset links + declared joins |
+| `dataClassification` | PII, PCI, sensitivity labels | Sensitivity |
+
+### Batching Rules
+
+- TRUST_ASSESSMENT → `[selfAttributes, stakeholdership, glossary]`
+- RELATIONSHIPS → `[hierarchy, neighbourhood]`
+- SENSITIVITY → `[hierarchy, dataClassification]`
+- FIELD_MEANING → `[hierarchy]` on parent, then `[glossary, selfAttributes]` per child
+
+### Limitations (state when relevant)
+
+1. No lineage — DataFlow excluded from neighbourhood.
+2. FK/PK objects are hierarchy children; the join they define ALSO appears in neighbourhood as a `core.PKFK` table-to-table edge — both are valid evidence of a declared relationship.
+3. Neighbourhood excludes DataFlow lineage, ParentChild, and ClassifiedAs associations.
+4. No reverse lookup — search by name to find dependents.
+
+---
+
+## 5. Intent Classification
+
+### Intents
+
+| Intent | Signals | Disambiguator |
+|--------|---------|---------------|
+| **BROAD_DISCOVERY** | "what data", "find", "relevant", "available", "show me", "do we have" | Open-ended, no specific asset yet |
+| **AUTHORITY_COMPARE** | "authoritative", "which one", "correct", "vs", "difference" | Two+ known candidates, comparative |
+| **FIELD_MEANING** | "key fields", "columns", "what does X mean", "metrics", "measures" | Targets fields/columns specifically |
+| **FIELD_RELIABILITY** | "can I rely on [field]", "can I use [field]", "trust this field" | Targets a NAMED FIELD (not dataset). If "rely on" → dataset = TRUST_ASSESSMENT |
+| **TRUST_ASSESSMENT** | "leadership", "present to", "rely on this data", "fit for use", "production-ready" | Dataset-level trustworthiness |
+| **FRESHNESS** | "how current", "when was", "last refreshed", "stale", "up to date" | Specifically about time/recency |
+| **RELATIONSHIPS** | "connect", "join", "link", "relate", "between", "foreign key" | About connections between assets |
+| **IMPACT_ANALYSIS** | "what would break", "downstream", "if we change", "rename", "impact" | Forward-looking consequences |
+| **PROVENANCE** | "how is it built", "what feeds", "derived", "source of", "comes from" | Backward-looking origins |
+| **ROOT_CAUSE** | "wrong", "incorrect", "explain why", "root cause", "mismatch" | References a problem/error |
+| **OWNERSHIP** | "who owns", "responsible", "steward", "contact", "approval" | About people/roles |
+| **SENSITIVITY** | "sensitive", "personal", "PII", "restricted", "special category", "classified" | Data protection characteristics (not meaning) |
+| **POLICY** | "policy", "rule", "compliance", "regulation", "GDPR", "lawful basis" | Governance rules constraining usage |
+| **SAFE_USAGE** | "safe to use", "permissible", "which can I", "what's allowed", "compliant", "safe ways" | Positive recommendation synthesized from findings |
+| **COMPLIANCE_FLAG** | "right to be forgotten", "RTBF", "consent", "opt-out", "suppress", "erasure" | Individual rights/consent mechanisms |
+
+### Routing Algorithm
+
+1. **Scan** for signal tokens (case-insensitive). Apply disambiguators for overlaps.
+2. **Route:** 1 intent → execute. 2 intents → both (primary first). 3+ or 0 → score by (signal count × disambiguator match), fallback to BROAD_DISCOVERY.
+3. **Context override:** If assets already known and prompt references them → skip search, use stored UUIDs.
+
+---
+
+## 6. Strategies
+
+### Call Budgets
+
+BROAD_DISCOVERY: 3–5 (up to 7 on a first-turn fitness/campaign prompt that triggers the §6.1 trap drill-down) | AUTHORITY_COMPARE: 1–2 | FIELD_MEANING: 2–4 | FIELD_RELIABILITY: 1–2 | TRUST_ASSESSMENT: 1–2 | FRESHNESS: 0–1 | RELATIONSHIPS: 1–2 | IMPACT_ANALYSIS: 2–4 | PROVENANCE: 2–3 | ROOT_CAUSE: 0–2 | OWNERSHIP: 1 | SENSITIVITY: 1–3 | POLICY: 1–2 | SAFE_USAGE: 0–2 | COMPLIANCE_FLAG: 0–1
+
+### 6.1 BROAD_DISCOVERY
+
+1. Extract the user's business-concept intent (ignore dimensional terms like EMEA, last quarter)
+2. Trust census: `search_assets(query="*", filterSpec={certified:true}, size=10, aggregationSpec=[{name:"agg", attributeNames:["core.classType"]}])` → review the actual certified assets returned (names, descriptions, resources) — these are the steward-vetted trusted data estate
+3. Semantic discovery: `search_assets(query=<user's business question in natural language>, mode=NL, size=10)` — NL mode matches descriptions semantically, critical when business concepts ("product performance", "profitability") don't appear in asset names
+4. Source expansion: If relevant assets found, search for co-located assets from the same origin/resource to surface the full connected domain: `search_assets(query="*", filterSpec={origin:[<origin_id>]}, size=10)` or use KEYWORD on related table names found in descriptions
+5. Read aggregation buckets: small named bucket = curated, large generic = staging
+6. **Fitness pre-scan (do NOT defer to later turns):** if the prompt implies the data will be USED — e.g. "for a campaign", "present to leadership", "target customers", "where's the customer/product data" — proactively run a fitness pass on the top asset so THIS turn's answer also covers business meaning, sensitivity/PII, ownership/policy, AND the specific governance traps the catalog exists to surface. A first-turn discovery answer that surfaces only findability (and defers meaning/sensitivity/policy to "later turns") is INCOMPLETE — the user asked a fitness question, answer it now. Run:
+   - (a) `get_asset_details(segments=[hierarchy, dataClassification, stakeholdership])` — lists fields, PII/sensitivity labels, and owner in one call.
+   - (b) **Trap drill-down (mandatory when a field name is ambiguous or geo/demographic-sounding — e.g. REGION, AREA, CODE, CATEGORY, TYPE):** `get_asset_details(segments=[glossary])` on those child fields. A benign-looking column can carry a glossary term revealing HIDDEN_SENSITIVITY (classic: REGION actually encodes *Religion* → special-category). Do NOT report field meaning from the column name alone — confirm from the field-level glossary term (§6.12 step 4).
+   - (c) **Compliance-flag scan (mandatory for any contact/campaign/targeting use):** inspect the hierarchy field names for consent / RTBF / opt-out / do-not-contact / suppression columns (§6.15). Report whether they are PRESENT (state the gating rule) or ABSENT (a NO_COMPLIANCE_FLAG gap that must be escalated before outreach) — do NOT merely say "no flags found" without calling it a gap.
+   This drill-down is expected to cost 2–3 calls on a first-turn fitness prompt — that is within budget and required; do NOT stop at the single combined call if traps remain unconfirmed.
+7. Report: assets grouped by resource with certification/rating, presenting connected domains together; when the pre-scan ran, include the fitness signals (meaning, sensitivity, ownership/policy)
+
+### 6.2 AUTHORITY_COMPARE
+
+1. For each candidate (max 3): `get_asset_details(segments=[selfAttributes, stakeholdership])`
+2. Compare: lifecycle > certification > documentation > rating > recency
+3. Declare winner + flag remaining gaps
+
+### 6.3 FIELD_MEANING
+
+1. `get_asset_details(segments=[hierarchy])` → get columns
+2. Pick top 3–5 relevant fields
+3. Per field: `get_asset_details(segments=[glossary, selfAttributes])`
+4. Assess: term present? Aligned or MEANING_MISMATCH? No term = UNDOCUMENTED
+5. Report: field → term mapping table
+
+### 6.4 FIELD_RELIABILITY
+
+1. Per field (max 3): `get_asset_details(segments=[glossary, selfAttributes, neighbourhood])` — neighbourhood carries DQ-rule associations; selfAttributes carries profiling/null stats. Trust is not glossary-only.
+2. **MANDATORY Verdict Checkpoint — complete this table per field BEFORE writing any prose:**
+
+| Check | Evidence (copy from tool response) | Result |
+|-------|-----------------------------------|--------|
+| Glossary term(s) exist? | [list from `glossary` array, or "empty"] | YES (count) / NO |
+| If YES, single term: does it align with column name + datatype? | [state term name vs column name + datatype] | ALIGNED / CONTRADICTING |
+| If YES, multiple terms: do they conflict with each other? | [list all term names] | CONFLICTING / CONSISTENT |
+| Business name exists? | [value from `core.businessName` or "none"] | YES / NO |
+| Business name aligns with column name? | [compare] | YES / NO / N/A |
+| Data-quality / profiling / rating signal present? | [DQ rule from `neighbourhood`; null-rate/row-count from `selfAttributes`; asset rating — else "none"] | YES (list) / NO |
+
+3. **Apply verdict — use the FIRST matching rule (stop immediately):**
+   - Multiple terms that conflict with each other or with the column's technical meaning → **AMBIGUOUS**
+   - Single term contradicts column name/datatype → **MEANING_MISMATCH**
+   - Single term aligns with column name/datatype → **RELIABLE**
+   - Zero glossary terms → **UNDOCUMENTED** (regardless of how intuitive the column name is)
+
+   Even when the verdict is UNDOCUMENTED, still report any DQ/profiling/rating signal found as **PARTIAL trust evidence** (it does NOT upgrade the verdict, per §3.8): e.g. "RATING is UNDOCUMENTED — no glossary term or business name; the only trust signal is a 0% null rate from profiling, which is insufficient for reliance without steward curation." Answer the user's "can I rely on it?" using the quality signals, not just the absence of a term.
+
+4. **Response structure (output in this exact order):**
+
+   **A. Verdict (lead with this — user reads this first)**
+   State the reliability conclusion plainly, including warnings and uncertainties. Use direct cautionary language for non-RELIABLE fields. Examples:
+   - "Be careful: RATING has no business name or glossary term (undocumented — a fitness-for-use gap). ID is mapped to two conflicting terms, 'Incident Details' and 'ItemID,' so its meaning is ambiguous until curated."
+   - "CUSTOMER_ID is reliable — aligned with glossary term 'Customer Identifier' (ACCEPTED)."
+   - "PRICE has a MEANING_MISMATCH: the column is numeric (NUMBER 8,2) but is linked to 'Prospective Customers' — do not trust the business metadata for this field."
+
+   **B. Evidence & Decision Parameters (show your work)**
+   Per field, show the checkpoint table (from step 2), then:
+   - What glossary terms / business names were found
+   - Which decision-tree rule matched and why
+   - If multiple candidates or terms were considered: list them with the score/reason each was accepted or rejected
+
+   Example format:
+   | Field | Glossary Terms Found | Business Name | Decision Rule | Verdict |
+   |-------|---------------------|---------------|---------------|---------|
+   | RATING | (none) | (none) | Zero terms → UNDOCUMENTED | UNDOCUMENTED |
+   | ID | "Incident Details", "ItemID" | "ItemID" | Multiple conflicting terms → AMBIGUOUS | AMBIGUOUS |
+
+   For rejected interpretations, state why:
+   - "ID could be read as 'ItemID' (aligned with PK + business name), but 'Incident Details' is also ACCEPTED — two conflicting governed meanings cannot both be correct, so the field is AMBIGUOUS until one is removed."
+
+   **C. Next Actions**
+   Concrete steps to resolve gaps or proceed:
+   - What the user should do (e.g., "confirm with data steward," "do not use for reporting until curated")
+   - What can be fixed in the catalog (e.g., "remove 'Incident Details' term from ID," "add a 'Product Rating' term to RATING")
+   - Whether you can perform the fix now (with user confirmation)
+
+5. **DO NOT** add qualifiers like "but it's probably fine," "you can still use it," or "Yes as the [X]" to any non-RELIABLE verdict. The verdict is the final word.
+
+#### Negative Example (DO NOT do this):
+
+```
+WRONG: RATING has no glossary term but the description says "average customer rating"
+so it's obviously the product rating → verdict: RELIABLE
+
+CORRECT verdict: "Be careful: RATING has no business name or glossary term
+(undocumented — a fitness-for-use gap). You cannot rely on it without steward confirmation."
+
+CORRECT evidence: glossary=[] | businessName=none | Rule: zero terms → UNDOCUMENTED
+CORRECT next action: "Link a 'Product Rating' glossary term to formalize the meaning."
 ```
 
-Read `total_matches`. That number tells you how to weight certification for the rest of the search:
+### 6.5 TRUST_ASSESSMENT
 
-- **Small (tens)** — certification is a strong, usable filter. Apply `certified: true` alongside your real query terms.
-- **Large (hundreds+)** — certification is near-universal here and discriminates weakly; lean on rating and recency instead.
+1. `get_asset_details(segments=[selfAttributes, stakeholdership, glossary])` — one call
+2. Score (0–10): Certification(+2) + Lifecycle(+2) + Freshness(+2) + Documentation(+2) + Ownership(+1) + Glossary(+1)
+3. Freshness: <30d→+2, 30-90→+1.5, 90-180→+1, 180-365→+0.5, >365→+0
+4. Labels: 8-10=Production-ready | 5-7=Sound with gaps | 3-4=Use with caution | 0-2=Not ready
+5. Output tree-format verdict with per-factor scores
 
-Then read the `classType` buckets, and expect them to contain **datasets only** — `Table`, `View`, `PDFFile`, `PowerBI.Cloud.Dataset`, `Salesforce.Object`, `HierarchicalFile` and the like. That is the norm, not a quirk of one tenant: certification is a dataset-grain signal. If a `BusinessTerm`, `Domain` or `Column` ever appears in those buckets, that tenant is doing something unusual and the rest of this section's advice needs rechecking.
+### 6.6 FRESHNESS
 
-The practical consequence: **`certified: true` is a dataset filter in disguise.** Adding it to a probe silently drops every glossary term, policy and column from the result set — so use it on technical-asset searches (Step 3) and never on a glossary probe (Step 6).
+1. Use timestamps from state if available; else `get_asset_details(segments=[selfAttributes])`
+2. Compare across related assets — flag if derived is older than source
+3. Report: timestamp table with staleness assessment
 
-> **Never run bare `query: "*"` with `certified: true` and read the results.** With no query term the ranking is arbitrary and the result set is paginated — the asset you want can sit outside the first page of an otherwise tiny set. Pair the certification filter **with** your search terms, always.
+### 6.7 RELATIONSHIPS
 
-### Step 3 — Search technical assets, then read the aggregation
+1. Per dataset: `get_asset_details(segments=[hierarchy, neighbourhood])`
+2. Hierarchy → PK/FK children = "declared relationship"
+3. Neighbourhood → RelatedTo = "catalog-inferred relationship"
+4. State honestly if lineage not available
 
-Run the compound-phrase and discriminating-term searches with `aggregationSpec` on `core.resourceType` and `core.classType`, and **no** `resourceType` filter on the first pass.
+### 6.8 IMPACT_ANALYSIS
 
-Then stop and read the buckets. The heuristic that matters:
+1. `search_assets(query=<asset/field name>)` → find referencing assets
+2. `get_asset_details(segments=[hierarchy, neighbourhood])` for top references
+3. Classify: FK = enforced | RelatedTo = inferred | name-only = possible
 
-- **Small buckets under descriptively-named resources are signal.** A resource named for its purpose (`snowflake_sales_customer`, `finance_dw_curated`) holding a handful of matches is a curated, modelled neighbourhood.
-- **Large buckets under generic names are noise.** `amazon redshift` with 48 hits, `workday_jdbc` with 33, is almost always a bulk-scanned staging area — dozens of near-identical `*_proxy`, `*_stg`, `*_uat` variants plus foreign keys and constraints.
+### 6.9 PROVENANCE
 
-**Do not chase the biggest bucket.** Volume tracks how much was scanned, not how much was curated.
+1. `get_asset_details(segments=[hierarchy, neighbourhood, selfAttributes])` — one call
+2. Read: FK/PK → source tables, RelatedTo → upstream, sourceStatementText → SQL
+3. **Feeder search (when neighbourhood shows no lineage — expected, since DataFlow is excluded, §4):** do NOT stop at "not documented." Actively `search_assets` for candidate upstream feeders by name — the FK-referenced source tables, and any staging / aggregate / job asset whose name echoes the fact (e.g. `*sales*`, `*aggregate*`, `orders*`, mapping/mapplet names). Then `get_asset_details(segments=[selfAttributes])` on the best match to read its build logic/SQL.
+4. Only if no feeder is discoverable by name: "derivation not documented in the catalog — confirm with steward"
 
-Useful `filterSpec` shortcuts:
+### 6.10 ROOT_CAUSE
 
-- `"certified": true` — pair with query terms, per Step 2. Technical-asset searches only: it excludes glossary terms and columns by construction.
-- `"averageRating": {"operator": "gt", "value": 3}`
-- `"assetLifecycle": ["Published"]` — exclude drafts and obsolete. This is the trust filter that works on *every* class, certified or not.
-- `"classType": ["com.infa.odin.models.relational.Table"]` — datasets only, excluding columns/keys.
-- `"resourceType": ["Snowflake"]` — **only after** the unscoped pass has shown you the spread.
+1. Review state: meaning mismatches, undocumented assets, stale timestamps
+2. Build causal chain from established facts
+3. Only call tools if chain has gaps (max 2 calls)
+4. Report: "likeliest root cause is [X] because [catalog evidence]" — label as hypothesis
 
-### Step 4 — Check grain before you commit to a candidate
+### 6.11 OWNERSHIP
 
-**Do this from the column-name list, before fetching full details.** It is the cheapest disqualifier available.
+1. `get_asset_details(segments=[stakeholdership])`
+2. Present → report names/roles. Absent → "No governance owner assigned."
+3. Suggest checking schema/resource level if gap found
 
-If the question is scoped to a period ("last quarter", "in March", "year on year"), an asset whose measures are all lifetime or rolling-window cannot answer it:
+### 6.12 SENSITIVITY
 
-- `TOTAL_*`, `LIFETIME_*`, `*_TO_DATE` → cumulative, no period cut.
-- `L7D_*`, `L30D_*`, `L90D_*` → rolling windows relative to `CURRENT_DATE()`. **`L90D` is not "last quarter."** It is the trailing 90 days ending today. Column descriptions sometimes claim these "support quarterly reviews" — read the definition, not the marketing.
-- A `DATE_KEY` / `DATE_VALUE` / `*_DATE` grain column → sums to any calendar or fiscal period. This is what a period-scoped question needs.
+1. Use hierarchy from state or fetch: `get_asset_details(segments=[hierarchy, dataClassification])`
+2. If dataClassification populated → report labels. If empty → "No classification applied" (UNCLASSIFIED gap)
+3. Assess fields by name/glossary even without classification:
+   - RESTRICTED: race, religion, gender, ethnicity, health (special category)
+   - PERSONAL: SSN, email, phone, DOB, name, address (PII)
+   - SAFE: city, country, job, product category (non-personal)
+4. Cross-reference glossary: REGION→Religion = HIDDEN_SENSITIVITY
+5. If no formal classification: "Assessment inferred from field names/glossary — confirm with DPO"
 
-For views and aggregates, read `core.sourceStatementText` in `selfAttributes` when present. It gives you the actual revenue/metric definition — status filters, currency conversion, join path — which is what you must reproduce if you end up querying source tables directly.
+### 6.13 POLICY
 
-### Step 5 — Navigate with `hierarchy` (optional, cost-aware)
+1. `search_assets(query=<domain>, filterSpec={classType:["com.infa.ccgf.models.governance.Policy"]}, size=5)`
+2. If found: `get_asset_details(segments=[selfAttributes])` → read scope/constraints
+3. If not found: try broader terms ("data protection", "privacy")
+4. Cross-reference with sensitivity: PII → restricted handling, special category → lawful basis
+5. Never invent policy. Label as "implied by classification" vs "stated in policy [name]"
 
-`get_asset_details(segments: ["hierarchy"])` returns an asset's **children** — complete and unranked. Two uses:
+### 6.14 SAFE_USAGE
 
-**Down, from a known asset.** Columns of a table or view in one call. Cheap, bounded (typically 10–30 rows), and often decisive — the column list alone settles the grain question in Step 4. Always prefer this over an NL "show columns from X".
+Primarily synthesis from conversation state. Only call tools if field analysis is incomplete.
 
-**Sideways, for context.** Resolve the parent schema, then read its child list to see what else lives in the neighbourhood — a daily aggregate, the stored procedure that builds it, an ETL audit table carrying freshness. Keyword ranking can bury these entirely; a sibling list cannot.
+1. Partition fields into:
+   - **FORBIDDEN:** MEANING_MISMATCH where true meaning is sensitive; special-category without lawful basis; true meaning ≠ intended use
+   - **CAUTION:** AMBIGUOUS (dual terms); PII (needs consent); undocumented sensitive-sounding
+   - **PERMISSIBLE:** Aligned terms + no sensitivity flags; non-personal attributes
+2. Add conditions: exclude RTBF=true, obtain consent for contact fields, don't segment on forbidden
+3. Report: structured guide (CAN use / MUST NOT use / needs resolution / prerequisites)
+4. **Restate the gate explicitly:** end with the applicable policy (name, or "implied by PII/special-category classification") AND the required approval/owner — e.g. "Gated on: marketing-use policy [implied by PII classification] + steward approval; no owner is assigned, so escalate before sending." A safe-usage answer that omits the policy + approval gate is incomplete.
+5. **When the ask is Data-Q&A you cannot execute read-only (counts, ranked lists, anti-joins):** do NOT stop at "cannot run it." Deliver the precise recipe — the governed table(s), the exact join/anti-join key(s), and the SQL that WOULD answer it — plus the caveats (safe fields, RTBF/consent exclusions). The recipe IS the deliverable.
 
-The sideways walk is **a deliberate choice, not a default.** Before doing it, weigh:
+### 6.15 COMPLIANCE_FLAG
 
-- **Fan-out is unbounded and invisible until the response lands.** `hierarchy` has no `size` or pagination. A curated schema returns a dozen children; a staging schema returns hundreds.
-- **The response mixes in non-datasets** — primary keys, foreign keys, procedures, constraints — alongside the tables you want. On a bulk-scanned schema that is the bulk of the payload.
-- **Walking *up* costs an extra lookup.** `hierarchy` returns children only, so reaching a parent means resolving it first (from the `path` string, via a targeted search on the database or schema name).
-
-**Cheap signal for whether to bother — reuse the aggregation you already have.** A small bucket under a descriptively-named resource is worth the walk. A large bucket under a generic one is not: stay in search and keep filtering.
-
-### Step 6 — Resolve definition-sensitive language
-
-Before reporting any period-, status-, or segment-scoped number, probe the glossary **for that specific word**. This is a targeted probe, not the broad vocabulary sweep in older versions of this skill.
-
-Trigger it when the question contains:
-
-- **A relative period** — "last quarter", "YTD", "this month", "last week". Fiscal calendars routinely differ from calendar ones. A tenant whose fiscal year starts in February makes "last quarter" May–July, not April–June — a completely different answer with no error message to warn you.
-- **A status or segment word** — "active", "churned", "closed-won", "at risk".
-- **A metric name with a house definition** — "revenue", "margin", "ARR", "NRR".
-
-```json
-{ "query": "fiscal quarter", "mode": "KEYWORD",
-  "filterSpec": { "classType": ["com.infa.ccgf.models.governance.BusinessTerm"] } }
-```
-
-Prefer `Published` terms over `Draft`, and note the domain when several compete. Quote the steward's definition in your answer and state the concrete date range you derived from it.
-
-**Never add `certified: true` to a glossary probe.** Terms are never certified (Core Principle 3), so the filter returns nothing and you will wrongly conclude the tenant has no definition for the word. `Published` is the trust signal here: a `Published`, uncertified `Fiscal Quarter` term is authoritative and should be quoted as such.
-
-> **Glossary probing is triggered, not blocking.** Older guidance ran a full vocabulary sweep before touching technical assets. In tenants with large or messy glossaries — dozens of near-duplicate `Customer` and `Revenue` terms across demo verticals, mostly `Draft` — that sweep costs several calls and returns nothing usable. Probe the glossary when a term will change the answer (above), or when a candidate asset carries a `glossary` link worth resolving.
-
-### Step 7 — Enrich the finalists
-
-For each serious candidate, `get_asset_details` with the segments you actually need:
-
-- **`glossary`** — the business terms stewards linked to this asset; the tenant meaning of the table.
-- **`dataClassification`** — PII/PCI/Confidential and similar. Tells you sensitivity *before* you read data. A `Person` classification on a customer table means the result set carries personal data — say so.
-- **`stakeholdership`** — owner / steward / SME. Cite them when trust or interpretation matters; defer to them when confidence is low.
-- **`hierarchy`** — columns, per Step 5.
-- **`selfAttributes`** — `sourceStatementText`, `technicalDescription`, `NumberOfRows`, certification metadata.
-- **`neighbourhood`** — connected assets, lineage, linked reports.
-
-Request only what the question needs. Fetch all segments only when the user explicitly asks for complete details.
-
-**Sanity-check the finalist before recommending it.** `NumberOfRows: 0` means empty *or* never profiled — flag it rather than assuming the table is populated. An uncertified asset with a better grain fit may still beat a certified one with the wrong grain: present both and say why.
-
-### Step 8 — Correlate and answer
-
-- Which assets are both trustworthy *and* actually answer the question at the right grain? Those are your primary answer.
-- Do classifications imply access or handling constraints the user should know about?
-- Do candidates disagree (different domains, different definitions, different stewards)? Say so; don't paper over it.
-
-Report: asset name, class, resourceType, certification, rating, linked terms with tenant definitions, classifications, steward, and the identity so the user can drill in. State explicitly any gap between what was asked and what the asset provides.
-
-### Step 9 — Hand off to a data-reading MCP
-
-Once discovery has produced a specific identity, pass the resolved path (from `hierarchy` / `path`) into the appropriate MCP — Snowflake, Postgres, S3, BI — to read the actual data.
-
-If the relevant connector is **installed but not enabled in this chat**, its tools will not be in your tool list. Say so plainly and tell the user to enable it in the chat's connector settings, rather than reporting the question as unanswerable.
+1. Scan hierarchy for patterns: RTBF, CONSENT, OPT_IN, OPT_OUT, DO_NOT_CONTACT, SUPPRESSION, ERASURE_FLAG
+2. If found: `get_asset_details(segments=[glossary, selfAttributes])` to confirm purpose
+3. Report with operational guidance:
+   - RTBF → "Filter WHERE RTBF IS NULL OR FALSE before outreach"
+   - Consent → "Only contact where CONSENT = TRUE"
+   - None found → "No compliance flags — escalate before campaign" (NO_COMPLIANCE_FLAG gap)
 
 ---
 
-## Handling Ambiguity and Empty Results
+## 7. Gap Detection
 
-- **KEYWORD returned nothing** — broaden the terms, drop `classType`, then and only then try NL.
-- **Hundreds of matches** — you are searching a dimensional term, or a staging area. Re-read the aggregation and narrow by resource.
-- **Multiple business terms match** — list them with domain and stakeholder; ask, or answer for all with clear labels.
-- **No certified asset exists** — say so explicitly, offer the best-rated candidate marked as uncertified, and surface the steward.
-- **A `certified: true` probe came back empty** — check what class you were looking for before reporting a gap. On glossary terms, domains, policies or columns the filter can only return zero, because those classes are never certified. Re-run with `assetLifecycle: ["Published"]` instead.
-- **No glossary term for a concept** — do not silently substitute a generic definition. Say the catalog has none and label any fallback as your own.
-- **A `resourceType` filter came from context rather than a search** — stop, run the unscoped pass first.
+### Completeness Check (after every tool response)
 
-## Cheatsheet
+| Field | Gap Type if missing/problematic |
+|-------|-------------------------------|
+| businessName/description | UNDOCUMENTED |
+| certified (datasets) | UNCERTIFIED |
+| stakeholders | UNOWNED |
+| glossary (aligned) | UNDOCUMENTED / AMBIGUOUS / MEANING_MISMATCH |
+| modifiedOn (vs peers) | STALE |
+| dataClassification | UNCLASSIFIED |
+| compliance flags | NO_COMPLIANCE_FLAG |
+| applicable policy | NO_POLICY |
+| glossary reveals hidden sensitivity | HIDDEN_SENSITIVITY |
 
-- KEYWORD always; NL only on genuine empty results; never NL for structural queries.
-- Read `resourceAgg` before the next call. Small named bucket = signal; big generic bucket = staging noise.
-- Size the certified set once, then pair `certified: true` **with** query terms — never bare `*`.
-- Only datasets are certified. `certified: true` is a dataset filter in disguise — never put it on a glossary probe; a `Published` uncertified term is authoritative.
-- Search the compound phrase, not only its parts.
-- Separate discriminating terms from dimensional ones; don't hunt for the dimension.
-- Grain first: `TOTAL_`/`LIFETIME_` = cumulative, `L30D_`/`L90D_` = rolling (not "last quarter"), `DATE_KEY` = period-capable.
-- `hierarchy` down for columns is cheap; `hierarchy` sideways for siblings is a deliberate, cost-checked move.
-- Probe the glossary for period/status/metric words that change the answer — not as a blanket opening sweep.
-- `NumberOfRows: 0` means empty or unprofiled. Flag it.
-- Read `sourceStatementText` before trusting an aggregate or view.
-- Discovery ends with an identity; data reading starts with it. Do not skip the handoff.
+### Enrichment (always confirm first)
 
-## Worked illustration of the method
+| Gap | Tool |
+|-----|------|
+| UNDOCUMENTED (no name/desc) | `update_asset_business_metadata` |
+| UNDOCUMENTED (no term) | `edit_data_asset_business_glossaries` |
+| UNCLASSIFIED sensitive data | `edit_data_asset_data_classifications` |
+| Quality confirmed, uncertified | `edit_asset_certification` |
 
-A period-scoped question over a messy multi-vertical tenant, showing the failure mode and the corrected path.
+---
 
-**Wasteful:** four opening searches — two broad glossary sweeps (`revenue`, `customer`) returning ~120 mostly-`Draft` demo terms, plus a hunt on the dimensional term (`EMEA`, 259 matches of staging columns). The aggregations from those calls already named the curated resource; they went unread while further broad searches were fired. NL retries drifted and errored. The winning asset was reached on call ~13.
+## 8. Conversation State
 
-**Corrected:** size the certified set (1 call) → compound-phrase search with certification and aggregations, read the buckets, spot the small purpose-named resource (1 call) → `get_asset_details` on the top hit with `selfAttributes` + `hierarchy`, which yields the column list *and* the view SQL, settling grain immediately (1 call) → glossary probe on "fiscal quarter" because the question is period-scoped (1 call) → optional sibling walk of the schema, justified because the bucket was small, revealing a daily-grain aggregate and its build procedure that keyword ranking had buried (2 calls).
+Maintain across turns:
+```
+DISCOVERY STATE:
+├── Scope: [topic]
+├── Assets: [name | UUID | type | resource | key facts]
+├── Facts: [evidence with source turn]
+├── Gaps: [type | asset/field | detail]
+└── Relationships: [source → target | mechanism | declared/inferred]
+```
 
-The general shape: **search to choose a neighbourhood, aggregations to confirm it, `hierarchy` to exhaust it, glossary to pin the definitions, then hand off.**
+**Rules:** Update after every call. Reference don't repeat. Don't re-fetch (use stored UUIDs). Cross-reference new vs established. Build causal chains across turns.
+
+**Pronoun resolution:** "this data" / "these" / "the table" → resolve from Assets state.
+
+---
+
+## 9. Response Format
+
+Every response MUST follow this three-part structure in order:
+
+### Part 1: Verdict (always first — the user's takeaway)
+
+Lead with the conclusion, stated plainly. Include warnings, uncertainties, and gaps directly in the verdict — do not bury them. Use cautionary language ("Be careful," "Do not rely on," "Ambiguous until curated") for non-clean results.
+
+- If something is trustworthy → say so clearly with the reason ("certified, aligned glossary term, steward-owned")
+- If something is problematic → say so clearly with the risk ("undocumented — no governed meaning exists," "two conflicting terms — ambiguous")
+- If you cannot determine → say so ("insufficient catalog metadata to assess — confirm with steward")
+- List which assets/fields meet the user's criteria and which do not
+- **Full-context synthesis / audit packs:** prioritize a COMPLETE compact structure over depth in any single section — cover every required area in brief (source → definitions → PII/sensitivity → data-subject rights → policy/lawful-basis → ownership → lineage/exposure → gaps) BEFORE elaborating, so the deliverable is self-contained and never truncated mid-section. Completeness beats depth for an audit deliverable.
+
+### Part 2: Evidence & Decision Parameters (show the reasoning)
+
+Show what was considered and why each decision was made:
+
+- **Assets/terms evaluated:** list everything that was examined
+- **Selection criteria applied:** what rules determined the outcome (certification > lifecycle > documentation > rating, or glossary alignment rules, etc.)
+- **Winners:** which assets/fields passed and why (with specific evidence from tool responses)
+- **Rejected/flagged:** which assets/fields failed and why — state the specific gap or conflict that disqualified them
+- Use tables for comparisons. Use the evidence checkpoint table for field reliability.
+
+### Part 3: Gaps (explicit inventory of what's missing or broken)
+
+A structured list of every governance gap found during the assessment. Each gap must include:
+
+| Gap Type | Asset/Field | Detail | Severity |
+|----------|------------|--------|----------|
+| UNDOCUMENTED | e.g., RATING | No glossary term, no business name | High — meaning unverified |
+| AMBIGUOUS | e.g., ID | Two conflicting terms: "ItemID" + "Incident Details" | High — cannot determine governed meaning |
+| MEANING_MISMATCH | e.g., PRICE | Column is NUMBER(8,2) but linked to "Prospective Customers" | Critical — metadata actively misleading |
+| UNOWNED | e.g., FCT_ORDERS_BY_PRODUCT | No stakeholders assigned | Medium — no escalation path |
+| UNCLASSIFIED | e.g., EMAIL | Likely PII but no data classification applied | High — compliance risk |
+
+Severity levels:
+- **Critical** — metadata is actively wrong/misleading; using it as-is causes errors
+- **High** — metadata is absent where it's needed for the user's purpose; cannot proceed safely without resolution
+- **Medium** — metadata is incomplete but doesn't block the user's immediate task
+- **Low** — nice-to-have improvement, no immediate risk
+
+DO NOT skip this section even if there are no gaps — state "No gaps found" explicitly so the user knows completeness was checked.
+
+### Part 4: Next Actions (always last)
+
+Concrete, actionable steps:
+- What the user should do (confirm with steward, avoid using for X, safe to proceed with Y)
+- What catalog gaps can be fixed and how (link term, remove incorrect term, add description)
+- Whether you can perform a fix now (always ask for confirmation before enrichment)
+
+### General Rules
+
+- **Asset names, not UUIDs.** Translate classType to plain language.
+- **Gaps are headline findings, not footnotes.** Surface them in the verdict, not buried in evidence.
+- Do NOT start responses with "I searched and found..." — lead with the verdict.
+- Do NOT use soft language for hard problems. "Undocumented" means undocumented, not "mostly fine but could use a glossary term."
+
+---
+
+## 10. Search Best Practices
+
+- **BROAD_DISCOVERY: trust census first, then NL mode.** When the user asks a business-concept question ("product performance", "sales and profitability"), start with the certified trust census (size=10) to see the trusted estate, then use NL mode to semantically match the user's intent to asset descriptions. KEYWORD mode searches asset names/aliases — it excels at specific-asset lookups but fails when the business concept only appears in descriptions.
+- **Other intents (FIELD_MEANING, RELATIONSHIPS, etc.): KEYWORD first.** When you know the asset name, KEYWORD is precise and fast. NL only on genuine zero-result retries.
+- **Trust census** before deep exploration: `search_assets(query="*", filterSpec={certified:true}, size=10, aggregationSpec=[...])`
+- **Read aggregation buckets** before next call. Small named = signal. Large generic = noise.
+- **Filter rules:** `certified:true` excludes non-datasets (never on glossary probes). `assetLifecycle:["Published"]` works on all types.
+- **Size:** probe=5, discovery=10, pagination=20 max. Never >20.
+- **Free aggregations:** every search returns `origin`, `resourceType`, and `assetLifecycle` buckets even with NO `aggregationSpec` — read them to route the next call before paying for another search.
+- **Buckets vs. size:** aggregation buckets are complete at any `size`, and `total_matches` is accurate for `size ≥ 1`. Do NOT set `size=0` to "just get counts" — use `size=1` for complete buckets + an accurate total + one sample row.
+- **Compound phrases:** Do NOT search multi-word compound phrases as one query (they return 0 results). Instead search individual meaningful terms, or use NL mode for the full phrase.
+- **Source expansion:** When you find a relevant asset, check its origin/resource — other assets in the same source likely form a connected domain. Search the same origin to find them.
+
+---
+
+## 11. Handling Ambiguity
+
+- KEYWORD empty → do NOT retry with another KEYWORD compound phrase. Switch to NL mode with the user's original business question, or broaden by dropping classType filters.
+- Hundreds of matches → narrow via aggregation buckets, or add `certified:true` filter to surface the trusted subset
+- Multiple terms → list all, flag conflicts
+- No certified → say so, offer best uncertified
+- No glossary term → do NOT substitute generic definition
+- Conflicting signals → report both, let user decide
+- Tool error → "unable to retrieve [X]" — never guess
+- Found one relevant asset → expand from same origin/resource to find connected assets in the same domain
+
+---
+
+## 12. Verdict Self-Check (silent — do not print to user)
+
+Before sending ANY response that includes a verdict or reliability assessment, silently verify:
+
+1. Did I fill the evidence checkpoint table for every field assessed? If NO → go back and fill it.
+2. Does every verdict follow strictly from the decision tree (first matching rule)? If NO → fix the verdict.
+3. Did I add any "you can rely on it anyway" / "but it's probably fine" / "Yes as the [X]" language to a non-RELIABLE field? If YES → remove it.
+4. Did I infer meaning from a column name without a glossary term backing it? If YES → downgrade to UNDOCUMENTED and state the gap.
+5. Did I report absence (no glossary, no business name, no owner) as a finding? If NO → add the gap.
+
+This check is internal only — never show it in the response. Its purpose is to catch intuition-based overrides before they reach the user.
