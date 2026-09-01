@@ -1,35 +1,59 @@
 # informatica-data-discovery
 
-A Claude Code plugin scaffold for Informatica IDMC, targeting two capability areas (with real Skills for CDGC):
+Trusted, catalog-grounded data discovery for Informatica IDMC in Claude Code.
 
-- **CDGC** (Cloud Data Governance and Catalog) — data catalog search, governance, asset lineage.
-- **Claire** — Informatica's GenAI/AI engine for AI-assisted recommendations, metadata enrichment, and natural-language data discovery.
+This plugin targets two Informatica IDMC capability areas — **CDGC** (Cloud Data Governance and Catalog) and **Claire** (Informatica's GenAI/AI engine). Today, CDGC is covered by two real, substantive Skills (catalog discovery and an AI-Ready Data Assessment scorecard).
 
-## Status
+Install via the `claude-plugins-official` marketplace.
 
-This is a **scaffold / placeholder** repo.
+## Quick Start
 
-- `.mcp.json` declares one MCP server, `cdgc-catalog-discovery` (`type: "http"`), with an empty `url` — it needs a real endpoint before it will work.
-- There is no MCP server entry for Claire yet.
-- `.claude-plugin/plugin.json` has no `userConfig` field, so there is currently no install-time prompt for a tenant/environment host. A real URL must either be hardcoded into `.mcp.json`, or a `userConfig` field must be added to `plugin.json` with a matching `${user_config.*}` substitution.
+1. **Add the marketplace.**
+   ```
+   /plugin marketplace add claude-plugins-official
+   ```
+2. **Install the plugin.**
+   ```
+   /plugin install informatica-data-discovery@claude-plugins-official
+   ```
+3. **Restart Claude Code / reload plugins** to pick up the manifest, MCP server, and Skills.
 
-The `skills/catalog-discovery/SKILL.md` and `skills/cdgc-ai-ready-data-assessemt/SKILL.md` skills, however, are real, substantive guidance for CDGC — not placeholders. See `CLAUDE.md` for more on filling in the remaining gaps.
+## Example Prompts
 
-## Directory Structure
+The `catalog-discovery` skill activates automatically on data questions like:
 
-```
-.claude-plugin/plugin.json            Plugin manifest (name, version, description, author)
-.mcp.json                             MCP server config — cdgc-catalog-discovery (url not yet set)
-skills/catalog-discovery/SKILL.md     CDGC catalog-discovery skill (real, not a placeholder)
-skills/cdgc-ai-ready-data-assessemt/  CDGC AI-Ready Data Assessment skill (real, not a placeholder)
-CLAUDE.md                             Guidance for future Claude Code sessions working in this repo
-```
+- "Where's the customer data with the highest quality?"
+- "Can I rely on the RATING field in FCT_ORDERS?"
+- "Is this data safe to use for a marketing campaign?"
+- "Who owns the SALES_FACT table, and is it certified?"
+- "What policy applies to this PII column?"
+- "Is there a right-to-be-forgotten flag on this dataset before I run outreach?"
 
-## Installing Locally
+For a full readiness scorecard, the `cdgc-ai-ready-data-assessemt` skill activates on prompts like:
 
-There is no marketplace manifest and no install/uninstall scripts in this repo. To use this plugin locally:
+- "Run a CDGC AI-ready data assessment for this catalog."
+- "Give me a readiness scorecard across coverage, freshness, policy, and lineage."
 
-1. Clone this repo.
-2. In Claude Code, add it as a local plugin — point your plugin config at this directory, or place/symlink it under your Claude Code plugins directory.
-3. Fill in a real `url` for `cdgc-catalog-discovery` in `.mcp.json` (there is no install-time host prompt yet).
-4. Restart Claude Code / reload plugins to pick up the manifest and skills.
+## Verify, Update, and Uninstall the Plugin
+
+- **Verify:** Confirm the plugin loaded by checking that `catalog-discovery` and `cdgc-ai-ready-data-assessemt` appear in Claude Code's Skills list, and that `cdgc-catalog-discovery` appears in the active MCP servers.
+- **Update:** `/plugin marketplace update claude-plugins-official`, then reinstall/upgrade the plugin, then restart Claude Code / reload plugins.
+- **Uninstall:** `/plugin uninstall informatica-data-discovery@claude-plugins-official`, then restart.
+
+## What's Included
+
+### 2 Skills (CDGC)
+
+| Area | Skill | Description |
+|------|-------|--------------|
+| Discovery & trust | `catalog-discovery` (v2.4.2) | Intent-driven catalog discovery. Discovers assets, assembles tenant context (glossary, ownership, certification, ratings), assesses trust/reliability per field, checks sensitivity/PII, looks up applicable policy, gives safe-usage guidance, and checks compliance flags (RTBF/consent) — with structured, severity-ranked gap reporting. Grounded exclusively in catalog metadata; zero-hallucination rules and a verdict-first response format. |
+| Readiness scorecard | `cdgc-ai-ready-data-assessemt` (v2.0) | Runs all ten CDGC AI-readiness measures in one connected pass — coverage, freshness SLA, metadata completeness, policy coverage, unstructured index, classification, data quality, golden-record match-rate proxy, glossary coverage, and lineage coverage — then renders a self-contained HTML scorecard to `artifacts/` (not committed). Overall status is always the weakest measure, never an average; formulas and query logic live in `references/*.md`, and the report is built from `assets/report-template.html`. |
+
+### What Else Is in the Box
+
+- **MCP servers:** One entry, `cdgc-catalog-discovery` (`.mcp.json`, `type: "http"`).
+- **Plugin manifest:** `.claude-plugin/plugin.json` declares `name`, `version` (`1.0.0`), `description`, and `author` only. There is no `userConfig` field, so there is no install-time prompt for a tenant/environment host.
+
+## More Information
+
+- The exact query logic, scoring formulas, and status thresholds behind the `cdgc-ai-ready-data-assessemt` scorecard are documented in `skills/cdgc-ai-ready-data-assessemt/references/*.md` (`measures.md`, `formulas.md`, `overall-status.md`, `report-json.md`, `topology.md`) — read these if you need to audit or extend how a measure's status is derived.
