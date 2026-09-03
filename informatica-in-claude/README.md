@@ -20,7 +20,7 @@ Install via the `claude-plugins-official` marketplace.
 
 ## Sample Prompts
 
-The `catalog-discovery` skill activates automatically on data questions like:
+The `catalog-and-data-discovery` skill activates automatically on data questions like:
 
 - Where's the customer data with the highest quality?
 - Can I rely on the RATING field in FCT_ORDERS?
@@ -31,7 +31,7 @@ The `catalog-discovery` skill activates automatically on data questions like:
 
 ## Verify, Update, and Uninstall the Plugin
 
-- **Verify:** Confirm the plugin is loaded by checking that `catalog-discovery` appears in Claude Code's Skills list and that `cdgc-catalog-discovery` appears in the active MCP servers.
+- **Verify:** Confirm the plugin is loaded by checking that `catalog-and-data-discovery` appears in Claude Code's Skills list and that `cdgc-catalog-discovery` appears in the active MCP servers.
 - **Update:** `/plugin marketplace update claude-plugins-official`, reinstall/upgrade the plugin, and then restart Claude Code / reload plugins.
 - **Uninstall:** `/plugin uninstall informatica-in-claude@claude-plugins-official` and then restart.
 
@@ -41,7 +41,7 @@ The `catalog-discovery` skill activates automatically on data questions like:
 
 | Area | Skill | Description |
 |------|-------|--------------|
-| Discovery & trust | `catalog-discovery` | Intent-driven catalog discovery. Discovers assets, assembles tenant context (glossary, ownership, certification, ratings), assesses trust/reliability per field, checks sensitivity/PII, looks up applicable policy, gives safe-usage guidance, and checks compliance flags (RTBF/consent) with structured, severity-ranked gap reporting. Grounded exclusively in catalog metadata; zero-hallucination rules and a verdict-first response format. |
+| Discovery & trust | `catalog-and-data-discovery` | Intent-driven catalog discovery. Discovers assets, assembles tenant context (glossary, ownership, certification, ratings), assesses trust/reliability per field, checks sensitivity/PII, looks up applicable policy, gives safe-usage guidance, and checks compliance flags (RTBF/consent) with structured, severity-ranked gap reporting. Grounded exclusively in catalog metadata; zero-hallucination rules and a verdict-first response format. |
 
 ### What Else is in the Box
 

@@ -1,10 +1,9 @@
 ---
-name: catalog-discovery
+name: catalog-and-data-discovery
 description: "Enterprise catalog discovery and governance over CDGC. Finds data assets from the catalog — tables, columns, files, reports, glossary terms, domains, policies — and evaluates their trustworthiness, business meaning, ownership, sensitivity, applicable policy, and safe use, grounded exclusively in catalog metadata. Use whenever the user asks a data or metadata question — 'find', 'where is', 'show me', 'what tables have X', 'is there a report on Y', 'give me [topic] data', 'who owns', 'what does column X mean', 'is this the authoritative source', 'can I rely on this', 'is this sensitive / PII', 'what policy applies', 'can I safely use this for [purpose]'. Covers business assets (domains, glossaries, policies) and technical assets (tables, columns, files). Always run BEFORE reading actual data through other MCPs so the caller picks the right, trusted, compliant asset."
-version: 1.7.0
 ---
 
-# Catalog Discovery v1.7.0 — Intent-Driven Trusted Data Discovery
+# Catalog and Data Discovery — Intent-Driven Trusted Data Discovery
 
 The CDGC catalog is the authoritative index of what data exists, what it means to *this* organization, who owns it, and how trustworthy it is. This skill discovers, validates, assesses, traces, and reports gaps — grounded exclusively in catalog metadata.
 
@@ -12,7 +11,7 @@ The CDGC catalog is the authoritative index of what data exists, what it means t
 
 ## 1. Core Principles
 
-1. **Catalog-first.** Never query a database directly from a cold prompt. The catalog tells you which asset is right.
+1. **Catalog-first.** Never query a database directly from a cold prompt. The catalog tells you which asset is right. Once the right, trusted asset is resolved and the user needs the *actual data*, hand off to the `data-exploration-agent` MCP (§4.6, "Reading actual data") — this skill itself only reads metadata.
 2. **Tenant context wins.** Glossary terms in *this* catalog override generic definitions.
 3. **Certification is dataset-only.** `certified: true` = steward-vetted. Business terms/domains/policies use `assetLifecycle` (`Published` > `Draft`).
 4. **Read aggregations first.** Every search returns buckets — use them to route the next call.
@@ -158,6 +157,22 @@ Fetch full details of one asset by identity. Always returns a `resolvedSummary` 
 2. FK/PK objects appear as `hierarchy` children; the join they define ALSO appears in `neighborhood` as a `core.PKFK` table-to-table edge — both are valid evidence of a declared relationship.
 3. `neighborhood` excludes `DataFlow` lineage, `ParentChild`, and `ClassifiedAs` associations.
 4. No reverse lookup — search by name to find dependents.
+
+### 4.6 Reading actual data — hand off to `data-exploration-agent`
+
+This skill is **metadata-only** — it decides *which* asset is right, trusted, and compliant, and never reads row values. When the user's question needs the **actual data** (row values, counts, aggregates, ranked lists, anti-joins, sampling the contents) — not just picking the asset — hand off to the **`data-exploration-agent`** MCP *after* discovery has resolved the trusted asset and its identity.
+
+**Sequence (catalog-first, always):** run discovery to pick the right/trusted/compliant asset and resolve its identity → then call `data-exploration-agent` to read the data → carry the governance verdict forward (do not read data from an asset you flagged FORBIDDEN/CAUTION in §6.14 without stating the gate).
+
+**How to call it:**
+- Authenticate first: `authenticate` → `complete_authentication`. (The data-explore token is a flat 60-minute TTL with no refresh — re-authenticate when it expires.)
+- Then call **`data_explore`** with the request payload.
+
+**MANDATORY — always send `external_id` (single asset) or `external_ids` (multiple assets) in the `data_explore` payload.** This is the asset's **EXTERNAL** catalog identity — the same value passed as `assetIdentity` with `identityType: EXTERNAL` — carried straight through from the `search_assets` / `get_asset_details` response. If `external_id`/`external_ids` is omitted, `data_explore` returns **empty result frames (zero rows) silently — no error is raised**. An empty frame therefore means "the external_id was missing," not "the asset has no data." Never call `data_explore` without it.
+
+> **Provenance:** the mandatory-`external_id` behavior is CONFIRMED from live experiment runs (CallRecords data-exploration arm over live `CALLRECS_WITH_INFO`): with `external_id` present, `data_explore` returns real `DataExploreResult` rows; a missing `external_id` was the *sole* cause of empty frames. It is NOT verified against `data-exploration-agent` source here — re-confirm the exact field spelling against the tool schema if a call unexpectedly returns empty.
+
+For sources the `data-exploration-agent` does not cover, pass the resolved path into the direct source MCP instead (Snowflake, Postgres, S3, BI). If the relevant connector is installed but not enabled in this chat, its tools will not appear — say so and ask the user to enable it, rather than reporting the question as unanswerable.
 
 ---
 
@@ -392,7 +407,7 @@ Primarily synthesis from conversation state. Only call tools if field analysis i
 2. Add conditions: exclude RTBF=true, obtain consent for contact fields, don't segment on forbidden
 3. Report: structured guide (CAN use / MUST NOT use / needs resolution / prerequisites)
 4. **Restate the gate explicitly:** end with the applicable policy (name, or "implied by PII/special-category classification") AND the required approval/owner — e.g. "Gated on: marketing-use policy [implied by PII classification] + steward approval; no owner is assigned, so escalate before sending." A safe-usage answer that omits the policy + approval gate is incomplete.
-5. **When the ask is Data-Q&A you cannot execute read-only (counts, ranked lists, anti-joins):** do NOT stop at "cannot run it." Deliver the precise recipe — the governed table(s), the exact join/anti-join key(s), and the SQL that WOULD answer it — plus the caveats (safe fields, RTBF/consent exclusions). The recipe IS the deliverable.
+5. **When the ask is Data-Q&A (counts, ranked lists, anti-joins):** do NOT stop at "cannot run it." Two paths: (a) if the actual data should be read, hand off the resolved asset to the `data-exploration-agent` MCP (§4.6, "Reading actual data") — remember `data_explore` requires `external_id`/`external_ids` or it returns empty frames silently; (b) otherwise deliver the precise recipe — the governed table(s), the exact join/anti-join key(s), and the SQL that WOULD answer it — plus the caveats (safe fields, RTBF/consent exclusions). The executed result or the recipe IS the deliverable.
 
 ### 7.15 COMPLIANCE_FLAG
 

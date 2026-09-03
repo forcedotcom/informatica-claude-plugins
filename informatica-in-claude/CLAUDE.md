@@ -23,4 +23,4 @@ Do not implement business logic against real CDGC/Claire APIs without explicit d
 
 ## Skills
 
-- `skills/catalog-discovery/SKILL.md` — real, substantive guidance for CDGC catalog discovery (intent-driven workflow covering discovery, trust/reliability, sensitivity, policy, safe-usage, and compliance flags). Not a placeholder.
+- `skills/catalog-and-data-discovery/SKILL.md` — real, substantive guidance for CDGC catalog discovery (intent-driven workflow covering discovery, trust/reliability, sensitivity, policy, safe-usage, and compliance flags), plus a hand-off to the `data-exploration-agent` MCP for reading actual data. Not a placeholder.
