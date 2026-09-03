@@ -17,8 +17,7 @@ Targets two Informatica IDMC capability areas:
 - **Claire** (Informatica's GenAI/AI engine)
 
 Current state (see `informatica-in-claude/CLAUDE.md` for full detail):
-- `.mcp.json` declares one server, `cdgc-catalog-discovery` (`type: "http"`), with a literal empty `url` — non-functional until a real endpoint is supplied. There is no `userConfig` field in `plugin.json` to prompt an installer for a tenant host, and no `${user_config.*}` substitution wired in.
-- There is **no Claire MCP server entry at all** — do not assume Claire tooling exists until one is added to `.mcp.json`.
+- `.mcp.json` declares two servers, `informatica-catalog-discovery` (CDGC) and `informatica-data-exploration` (Claire), both `type: "http"` with a literal empty `url` — non-functional until real endpoints are supplied. There is no `userConfig` field in `plugin.json` to prompt an installer for a tenant host, and no `${user_config.*}` substitution wired in.
 - `skills/catalog-and-data-discovery/SKILL.md` is a real, substantive skill (not a placeholder): an intent-driven catalog discovery workflow covering discovery, trust/reliability assessment, sensitivity/PII classification, policy lookup, safe-usage guidance, and compliance-flag (RTBF/consent) checks with structured gap detection, plus a hand-off to the `data-exploration-agent` MCP for reading actual data.
 
 Do not implement business logic against real CDGC/Claire APIs without explicit direction — this scaffold intentionally has none yet.

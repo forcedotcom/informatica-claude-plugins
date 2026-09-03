@@ -13,9 +13,7 @@ There is no build/test/lint tooling in this repo (no `package.json`, `Makefile`,
 
 `.claude-plugin/plugin.json` declares only `name`, `version`, `description` (currently an empty string), and `author`. It has **no `userConfig` field** — there is currently no mechanism for Claude Code to prompt an installer for a tenant/environment host at install or enable time.
 
-`.mcp.json` declares a single server, `cdgc-catalog-discovery` (`type: "http"`), with `url: ""` — a literal empty string, not a `${user_config.*}` substitution and not a hardcoded host. As written, this entry is non-functional until a real URL is supplied, either as a literal value in `.mcp.json` or by adding a `userConfig` field to `plugin.json` and referencing it here (e.g. `${user_config.cdgc_mcp_host}`).
-
-There is **no `claire-data-management-orchestrator` entry, and no Claire-related server at all**, in `.mcp.json`. The Claire capability area currently has no MCP wiring in this plugin — do not assume a Claire server exists until one is added to `.mcp.json`.
+`.mcp.json` declares two servers — `informatica-catalog-discovery` (CDGC) and `informatica-data-exploration` (Claire) — both `type: "http"` with `url: ""`, a literal empty string, not a `${user_config.*}` substitution and not a hardcoded host. As written, neither entry is functional until a real URL is supplied, either as a literal value in `.mcp.json` or by adding a `userConfig` field to `plugin.json` and referencing it here (e.g. `${user_config.cdgc_mcp_host}`).
 
 There is no `.claude-plugin/marketplace.json` in this repo, so it cannot be installed via `/plugin marketplace add` against itself; it can only be added as a local plugin path today.
 

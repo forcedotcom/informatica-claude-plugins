@@ -31,7 +31,7 @@ The `catalog-and-data-discovery` skill activates automatically on data questions
 
 ## Verify, Update, and Uninstall the Plugin
 
-- **Verify:** Confirm the plugin is loaded by checking that `catalog-and-data-discovery` appears in Claude Code's Skills list and that `cdgc-catalog-discovery` appears in the active MCP servers.
+- **Verify:** Confirm the plugin is loaded by checking that `catalog-and-data-discovery` appears in Claude Code's Skills list and that `informatica-catalog-discovery` and `informatica-data-exploration` appear in the active MCP servers.
 - **Update:** `/plugin marketplace update claude-plugins-official`, reinstall/upgrade the plugin, and then restart Claude Code / reload plugins.
 - **Uninstall:** `/plugin uninstall informatica-in-claude@claude-plugins-official` and then restart.
 
@@ -45,5 +45,5 @@ The `catalog-and-data-discovery` skill activates automatically on data questions
 
 ### What Else is in the Box
 
-- **MCP servers:** One entry, `cdgc-catalog-discovery` (`.mcp.json`, `type: "http"`).
+- **MCP servers:** Two entries in `.mcp.json` (`type: "http"`): `informatica-catalog-discovery` (CDGC) and `informatica-data-exploration` (Claire).
 - **Plugin manifest:** `.claude-plugin/plugin.json` declares `name`, `version` (`1.0.0`), `description`, and `author` only. There's no `userConfig` field, so there's no install-time prompt for a tenant/environment host.
