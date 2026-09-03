@@ -4,6 +4,6 @@ A container repo for Claude Code plugins targeting Informatica IDMC (Intelligent
 
 ## Plugins
 
-- **[`informatica-in-claude/`](informatica-in-claude/)** — Data discovery for Informatica IDMC, covering CDGC (Cloud Data Governance and Catalog) search/discovery and a ten-measure CDGC AI-Ready Data Assessment; Claire (Informatica's GenAI engine) integration is not yet wired up.
+- **[`informatica-in-claude/`](informatica-in-claude/)** — Data discovery for Informatica IDMC, covering CDGC (Cloud Data Governance and Catalog) search/discovery; Claire (Informatica's GenAI engine) integration is not yet wired up.
 
 See each plugin's own `README.md`/`CLAUDE.md` for setup details and current limitations.
