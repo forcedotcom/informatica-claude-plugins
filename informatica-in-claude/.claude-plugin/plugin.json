@@ -1,0 +1,8 @@
+{
+  "name": "informatica-in-claude",
+  "version": "1.0.0",
+  "description": "Claude Code plugin for Informatica IDMC with catalog discovery, data Q&A and AI-readiness-assessment skills.",
+  "author": {
+    "name": "informatica"
+  }
+}

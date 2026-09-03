@@ -24,11 +24,11 @@ Use the GitHub Issues page to submit issues, enhancement requests, and discuss i
 - If you'd like to submit a fix for a bug, [send a pull request](#creating-a-pull-request) and mention the issue number. Since this repo has no automated test suite (see below), describe how you validated the fix manually.
 
 ### New Features / New Plugins
-- If you'd like to propose a new plugin, or new capability inside the existing `informatica-data-discovery/` plugin, describe the problem you want to solve in a [new issue](https://github.com/forcedotcom/informatica-claude-plugins/issues/new) first.
+- If you'd like to propose a new plugin, or new capability inside the existing `informatica-in-claude/` plugin, describe the problem you want to solve in a [new issue](https://github.com/forcedotcom/informatica-claude-plugins/issues/new) first.
 - Issues identified as a feature request will be labeled `enhancement`.
 - Please wait for feedback from the maintainer before spending significant time writing the code — an `enhancement` may not align with the project's current direction.
 
-**Adding a new plugin** should follow the same shape as `informatica-data-discovery/` (see the root [`CLAUDE.md`](CLAUDE.md) for full detail):
+**Adding a new plugin** should follow the same shape as `informatica-in-claude/` (see the root [`CLAUDE.md`](CLAUDE.md) for full detail):
 - A top-level directory named for the plugin.
 - Its own `.claude-plugin/plugin.json` manifest.
 - Its own `.mcp.json` MCP server config, if the plugin needs one.
