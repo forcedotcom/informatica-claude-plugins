@@ -11,13 +11,14 @@ The CDGC catalog is the authoritative index of what data exists, what it means t
 
 ## 1. Core Principles
 
-1. **Catalog-first.** Never query a database directly from a cold prompt. The catalog tells you which asset is right. Once the right, trusted asset is resolved and the user needs the *actual data*, hand off to the `data-exploration-agent` MCP (§4.6, "Reading actual data") — this skill itself only reads metadata.
+1. **Catalog-first.** Never query a database directly from a cold prompt. The catalog tells you which asset is right. Once the right, trusted asset is resolved and the user needs the *actual data*, hand off to the `data-exploration-agent` MCP (§4.7, "Reading actual data") — this skill itself only reads metadata.
 2. **Tenant context wins.** Glossary terms in *this* catalog override generic definitions.
 3. **Certification is dataset-only.** `certified: true` = steward-vetted. Business terms/domains/policies use `assetLifecycle` (`Published` > `Draft`).
 4. **Read aggregations first.** Every search returns buckets — use them to route the next call.
 5. **Gaps are findings.** Missing description, absent owner, no glossary term — report these explicitly.
 6. **Zero hallucination.** Every claim cites a tool response or the absence of expected data.
 7. **Minimize calls.** Batch segments. Cap at 3–5 calls per strategy unless user asks for more.
+8. **Parallelize independent calls.** When multiple tool calls have no data dependency between them, issue them in the same turn — do NOT wait for one to return before sending the next. See §4.5 for the execution model.
 
 ---
 
@@ -67,7 +68,7 @@ Business assets do not use this two-level split — their `classType`s (`Busines
 
 ### 3.3 Family rules
 
-- **Technical assets** use `certified: true` as the primary trust signal (Dataset-only, per §1.3).
+- **Technical assets** use `certified: true` as the primary trust signal (Dataset-only, per §1 principle 3).
 - **Business assets** use `assetLifecycle` (`Published` > `DRAFT` > `OBSOLETE`) as the trust signal. They are not "certified" in the catalog sense.
 - `stakeholdership` applies to both families.
 - `hierarchy` is meaningful for containers along the technical chain: `core.Resource → core.DataSource (Database/Schema) → core.Dataset → core.DataElement`. Also applies to `Domain → SubDomain` on the business side.
@@ -132,14 +133,16 @@ Search the catalog by natural language (NL) or keyword. Returns a page of asset 
 
 Fetch full details of one asset by identity. Always returns a `resolvedSummary` (identity, name, type, location, description, stakeholders resolved to names/emails, assetGroups, timestamps) plus raw `systemAttributes`. Additional aspects are opt-in via `segments[]` — pick the minimum set for the intent (§4.4 Batching rules).
 
-**Parameters:** `assetIdentity` (required — UUID or human-readable path), `assetIdentityType` (`INTERNAL` = UUID default, `EXTERNAL` = path), `segments[]` (see §4.3; default is `summary` only).
+**Parameters:** `assetIdentity` (required), `identityType` (`INTERNAL` = UUID default, `EXTERNAL` = path), `segments[]` (see §4.3; default is `summary` only).
+
+**Always use internal UUID (the `identity` field from search results) with the default `INTERNAL` identity type.** Do not use `identityType: EXTERNAL` — the `externalId` field includes a `~classType` suffix that the API rejects with 400. Do not attempt to construct external IDs from child asset paths. External IDs are only needed for the `data_explore` hand-off (§4.7), where you pass the `externalId` value exactly as returned from search/details — never constructed.
 
 ### 4.3 Segments
 
 - **`summary`** (default) — core identity + lifecycle: name, `classType`, description, `certified`, rating, `assetLifecycle`, timestamps, stakeholders, path.
 - **`selfAttributes`** — self-declared attributes: `sourceStatementText` (view SQL), `NumberOfRows`, custom attributes, `businessName`.
 - **`stakeholdership`** — full stakeholder list with governance roles (Data Owner, Data Steward, etc.), beyond the truncated `summary` view.
-- **`glossary`** — linked business terms with `curationStatus` (`ACCEPTED` | `INFERRED` | `REJECTED`) — the load-bearing signal for meaning verdicts (§2.2).
+- **`glossary`** — linked business terms with `curationStatus` (`ACCEPTED` | `INFERRED` | `REJECTED`) — the load-bearing signal for meaning verdicts (§2 rule 2).
 - **`hierarchy`** — declared children along the containment chain: columns under a Table, PK/FK/indexes, SubDomains under a Domain.
 - **`neighborhood`** — associations to other assets: declared PK/FK table-to-table joins (`core.PKFK`), glossary links, DQ rules, `RelatedTo`. Excludes `ParentChild`, `DataFlow`, `ClassifiedAs`.
 - **`dataClassification`** — PII, PCI, and other sensitivity labels (technical assets only).
@@ -151,18 +154,53 @@ Fetch full details of one asset by identity. Always returns a `resolvedSummary` 
 - SENSITIVITY → `[hierarchy, dataClassification]`
 - FIELD_MEANING → `[hierarchy]` on parent, then `[glossary, selfAttributes]` per child
 
-### 4.5 Limitations (state when relevant)
+### 4.5 Parallel execution model
+
+Issue independent tool calls in the **same turn** — do not wait for one to return before sending the next. Two calls are independent when neither needs a value from the other's response.
+
+**Round model for BROAD_DISCOVERY (target: 2–3 rounds depending on path):**
+
+Column UUIDs can arrive from two sources — Round 1 search results or Round 2 hierarchy. Which path applies determines whether glossary wiring runs in Round 2 or Round 3.
+
+```
+Round 1 (parallel):  search(topic) + search(dimension terms) + search(fiscal terms)
+                     ↓ identities resolve — check: did search return column UUIDs?
+
+─── Fast path (columns in Round 1 results — 2 rounds total) ─────────────────
+Round 2 (parallel):  get_asset_details(top asset, [hierarchy, selfAttributes, dataClassification, stakeholdership])
+                     + get_asset_details(date column, [glossary])      — fiscal wiring
+                     + get_asset_details(region column, [glossary])    — dimensional wiring
+                     Column UUIDs already known → glossary runs alongside hierarchy, not after it.
+
+─── Slow path (columns NOT in Round 1 results — 3 rounds) ───────────────────
+Round 2 (parallel):  get_asset_details(top asset, [hierarchy, selfAttributes, dataClassification, stakeholdership])
+                     + get_asset_details(related dimension table, [hierarchy])
+                     ↓ column identities resolve from hierarchy
+Round 3 (parallel):  get_asset_details(date column, [glossary])      — fiscal wiring
+                     + get_asset_details(region column, [glossary])   — dimensional wiring
+```
+
+**Rules:**
+- All searches in step 1–3 of §7.1 are independent → **always parallel in Round 1**.
+- **Path selection after Round 1:** inspect search results for column/DataElement identities. If the columns you need for glossary wiring (date column, region column, etc.) appeared in Round 1 results, their UUIDs are already known — take the fast path. If search returned only the parent table (common when column names don't match the keyword), take the slow path.
+- **Fast path:** all `get_asset_details` calls — hierarchy on the parent, glossary on known columns — are independent → **all parallel in Round 2**. Do NOT wait for hierarchy to "discover" column UUIDs you already have from search. This eliminates Round 3 entirely.
+- **Slow path:** hierarchy fetch in Round 2 → column UUIDs resolve → glossary wiring checks on those columns in Round 3.
+- **Do not re-search for columns the hierarchy already gave you.** After Round 2's hierarchy fetch returns the full column list with UUIDs, use those UUIDs directly for Round 3 glossary calls. A separate `search_assets(query="ORDER_DATE")` to find a column UUID that hierarchy already returned is a wasted call.
+- Escalation-on-zero (§7.1 step 3) is inherently sequential — it retries only when the prior call returned zero. This is the one case where waiting is correct.
+- Segment batching (§4.4) still applies — combine segments into one call per asset rather than one call per segment.
+
+### 4.6 Limitations (state when relevant)
 
 1. No lineage — `DataFlow` is excluded from `neighborhood`.
 2. FK/PK objects appear as `hierarchy` children; the join they define ALSO appears in `neighborhood` as a `core.PKFK` table-to-table edge — both are valid evidence of a declared relationship.
 3. `neighborhood` excludes `DataFlow` lineage, `ParentChild`, and `ClassifiedAs` associations.
 4. No reverse lookup — search by name to find dependents.
 
-### 4.6 Reading actual data — hand off to `data-exploration-agent`
+### 4.7 Reading actual data — hand off to `data-exploration-agent`
 
 This skill is **metadata-only** — it decides *which* asset is right, trusted, and compliant, and never reads row values. When the user's question needs the **actual data** (row values, counts, aggregates, ranked lists, anti-joins, sampling the contents) — not just picking the asset — hand off to the **`data-exploration-agent`** MCP *after* discovery has resolved the trusted asset and its identity.
 
-**Sequence (catalog-first, always):** run discovery to pick the right/trusted/compliant asset and resolve its identity → then call `data-exploration-agent` to read the data → carry the governance verdict forward (do not read data from an asset you flagged FORBIDDEN/CAUTION in §6.14 without stating the gate).
+**Sequence (catalog-first, always):** run discovery to pick the right/trusted/compliant asset and resolve its identity → then call `data-exploration-agent` to read the data → carry the governance verdict forward (do not read data from an asset you flagged FORBIDDEN/CAUTION in §7.14 without stating the gate).
 
 **How to call it:**
 - Authenticate first: `authenticate` → `complete_authentication`. (The data-explore token is a flat 60-minute TTL with no refresh — re-authenticate when it expires.)
@@ -222,25 +260,49 @@ For sources the `data-exploration-agent` does not cover, pass the resolved path 
 
 ### Call Budgets
 
-BROAD_DISCOVERY: 3–5 (up to 7 on a first-turn fitness/campaign prompt that triggers the §7.1 trap drill-down) | AUTHORITY_COMPARE: 1–2 | FIELD_MEANING: 2–4 | FIELD_RELIABILITY: 1–2 | TRUST_ASSESSMENT: 1–2 | FRESHNESS: 0–1 | RELATIONSHIPS: 1–2 | IMPACT_ANALYSIS: 2–4 | PROVENANCE: 2–3 | ROOT_CAUSE: 0–2 | OWNERSHIP: 1 | SENSITIVITY: 1–3 | POLICY: 1–2 | SAFE_USAGE: 0–2 | COMPLIANCE_FLAG: 0–1
+BROAD_DISCOVERY: 3–5 (up to 10 on a first-turn fitness/campaign prompt that triggers escalation, column-to-parent derivation, origin-scoped searches, and wiring checks per §7.1) | AUTHORITY_COMPARE: 1–2 | FIELD_MEANING: 2–4 | FIELD_RELIABILITY: 1–2 | TRUST_ASSESSMENT: 1–2 | FRESHNESS: 0–1 | RELATIONSHIPS: 1–2 | IMPACT_ANALYSIS: 2–4 | PROVENANCE: 2–3 | ROOT_CAUSE: 0–2 | OWNERSHIP: 1 | SENSITIVITY: 1–3 | POLICY: 1–2 | SAFE_USAGE: 0–2 | COMPLIANCE_FLAG: 0–1
 
 ### 7.1 BROAD_DISCOVERY
 
 1. **Term extraction — include dimensional terms.** From the question, extract every catalog-relevant term: business concepts ("revenue", "customer") AND dimensional / qualifying terms ("EMEA", "last quarter", "by category"). Do NOT drop dimensional terms as filtering-only noise — the catalog governs them too (Fiscal Quarter, Region, Product Category typically exist as glossary terms, business domains, or reference dimensions), and dropping them loses the exact governance context that answers the question. Every extracted term is a candidate query for steps 2–4, and each should be resolved against BOTH technical assets (tables, columns, files, reports) AND business assets (glossary terms, domains, policies). The highest-value hit shape is a technical asset that carries a linked business glossary term — physical location + governed meaning in one place — rank this shape first when reporting (step 7).
-2. **One topic-scoped call in the shape-matched mode (§11's router).** Route by the query the user actually asked:
-   - Noun / entity / named-asset shape → `search_assets(query=<terms>, mode=KEYWORD, size=10, aggregationSpec=[{name:"agg", attributeNames:["core.classType"]}])`
-   - Concept-phrase / question-shaped / supertype-word shape → `search_assets(query=<user's phrasing>, mode=NL, size=10, aggregationSpec=[{name:"agg", attributeNames:["core.classType"]}])`
+2. **⟦ROUND 1 — all parallel⟧ One topic-scoped search PLUS all dimensional/fiscal term searches in the same turn.** Issue the topic search AND the dimensional term searches (e.g. EMEA, fiscal quarter) simultaneously — they have no data dependency.
+
+   **Hard rule — compound-phrase gate (apply before routing).** If any extracted topic is a multi-word phrase ("sales revenue", "customer orders", "product performance"), do NOT pass it as a single KEYWORD query — KEYWORD matches token-by-token and multi-word compounds return 0 results. Two options: (a) split into individual single-word KEYWORD searches, each run in parallel within Round 1 (preferred when each word is a meaningful asset name), or (b) route the full phrase to NL mode (preferred when the words form one concept, e.g. "customer lifetime value"). This is a hard gate, not a tip — violating it wastes a call and returns zero.
+
+   Route each search by shape:
+   - Single noun / entity / named-asset shape → `search_assets(query=<term>, mode=KEYWORD, size=10, aggregationSpec=[{name:"agg", attributeNames:["core.classType"]}])`
+   - Multi-word concept phrase (if not split above) → `search_assets(query=<user's phrasing>, mode=NL, size=10, aggregationSpec=[{name:"agg", attributeNames:["core.classType"]}])`
    - Cold-start / topic-less prompt only → trust census (`query="*"`, `filterSpec={certified:true}`, `aggregationSpec=[{name:"agg", attributeNames:["core.classType"]}]`)
    Apply `filterSpec={certified:true}` inline when the user is asking for trusted data. Read the returned assets AND the free `core.classType` / `origin` / `resourceType` / `assetLifecycle` buckets before spending another call.
-3. **Escalation on zero.** KEYWORD zero → retry as NL with the user's original phrasing. NL zero → drop filters (`certified:true`, classType) or fall back to KEYWORD on concrete nouns from the question. Still zero → state honestly that the tenant has no match; do NOT invent one.
-4. Source expansion: If relevant assets found, search for co-located assets from the same origin/resource to surface the full connected domain: `search_assets(query="*", filterSpec={origin:[<origin_id>]}, size=10)` or use KEYWORD on related table names found in descriptions
+3. **Escalation on zero.** Diagnose the cause — filter or mode — before retrying:
+   - **Filter-first escalation (when `certified:true` or `classType` filter was applied):** retry the SAME mode WITHOUT those filters. If results appear, the data exists but is not certified/typed — report as an UNCERTIFIED or UNTYPED gap alongside the results. Do NOT switch to NL mode to work around a filter problem — NL silently drops `filterSpec`, which hides the certification gap instead of surfacing it.
+   - **Mode escalation (when no restrictive filter was applied, or filter-drop also returned zero):** KEYWORD zero → retry as NL with the user's original phrasing. NL zero → fall back to KEYWORD on concrete nouns from the question.
+   - **Still zero after both:** state honestly that the tenant has no match; do NOT invent one.
+   - **Column-to-parent derivation (when escalation returns DataElements but no parent Dataset).** Certification is dataset-only (§1 principle 3), so dropping the `certified:true` filter often surfaces columns (e.g. NET_SALES) whose parent table (FACT_ORDER) didn't match the keyword. When results contain DataElements but no Dataset: (a) read the column's `location` / `path` from the search result — it names the parent table and its origin; (b) use the parent table name + origin to resolve the Dataset in the next round (origin-scoped search per step 4, or `get_asset_details` if the parent UUID is already in the column's hierarchy). Do NOT issue a separate broad search for the parent — the column's location already tells you where it lives. Report the parent as UNCERTIFIED if the original certified search missed it.
+4. **Origin-scoped follow-up searches.** When a previous call has resolved an asset's `origin` or `resource`, use `filterSpec={origin:[<origin_id>]}` to scope all subsequent searches to that source. This applies to two scenarios:
+   - **Sibling discovery (finding co-located assets):** `search_assets(query="*", filterSpec={origin:[<origin_id>]}, size=10)` to surface the full connected domain from the same source. Use KEYWORD on related table names found in descriptions.
+   - **Known-asset resolution (finding a specific asset within a resolved source):** when you know an asset name from a prior result (e.g. a parent table from a column's location, a dimension table from a description) and you know its origin, search origin-scoped: `search_assets(query="FACT_ORDER", mode=KEYWORD, filterSpec={origin:[<origin_id>]}, size=5)`. This is cheaper and more precise than a broad search — it eliminates same-name assets from other sources and avoids polluting results with staging duplicates.
 5. Read aggregation buckets: small named bucket = curated, large generic = staging
-6. **Fitness pre-scan (do NOT defer to later turns):** if the prompt implies the data will be USED — e.g. "for a campaign", "present to leadership", "target customers", "where's the customer/product data" — proactively run a fitness pass on the top asset so THIS turn's answer also covers business meaning, sensitivity/PII, ownership/policy, AND the specific governance traps the catalog exists to surface. A first-turn discovery answer that surfaces only findability (and defers meaning/sensitivity/policy to "later turns") is INCOMPLETE — the user asked a fitness question, answer it now. Run:
-   - (a) `get_asset_details(segments=[hierarchy, dataClassification, stakeholdership])` — lists fields, PII/sensitivity labels, and owner in one call.
+6. **⟦ROUND 2 — parallel; see §4.5 fast/slow path⟧ Fitness pre-scan (do NOT defer to later turns):** if the prompt implies the data will be USED — e.g. "for a campaign", "present to leadership", "target customers", "where's the customer/product data" — proactively run a fitness pass on the top asset so THIS turn's answer also covers business meaning, sensitivity/PII, ownership/policy, AND the specific governance traps the catalog exists to surface. A first-turn discovery answer that surfaces only findability (and defers meaning/sensitivity/policy to "later turns") is INCOMPLETE — the user asked a fitness question, answer it now.
+
+   **Before issuing Round 2 calls, check which path applies (§4.5):**
+   - **Fast path (column UUIDs already known from Round 1 search results):** issue hierarchy fetch on the parent AND glossary wiring checks on known columns ALL in parallel in this round. Do NOT wait for hierarchy to "discover" column UUIDs you already have — that wastes a round.
+   - **Slow path (Round 1 returned only the parent table, not columns):** issue hierarchy fetch in this round; column UUIDs resolve from the hierarchy response; glossary wiring moves to step 6(e)/Round 3.
+
+   Run:
+   - (a) `get_asset_details(segments=[hierarchy, dataClassification, stakeholdership])` — lists fields, PII/sensitivity labels, and owner in one call. **Note:** hierarchy returns all child column UUIDs. If you need column UUIDs for glossary checks in step 6(d)/(e), read them from THIS response — do NOT issue a separate search for a column that hierarchy already returned.
    - (b) **Trap drill-down (mandatory when a field name is ambiguous or geo/demographic-sounding — e.g. REGION, AREA, CODE, CATEGORY, TYPE):** `get_asset_details(segments=[glossary])` on those child fields. A benign-looking column can carry a glossary term revealing HIDDEN_SENSITIVITY (classic: REGION actually encodes *Religion* → special-category). Do NOT report field meaning from the column name alone — confirm from the field-level glossary term (§7.12 step 4).
    - (c) **Compliance-flag scan (mandatory for any contact/campaign/targeting use):** inspect the hierarchy field names for consent / RTBF / opt-out / do-not-contact / suppression columns (§7.15). Report whether they are PRESENT (state the gating rule) or ABSENT (a NO_COMPLIANCE_FLAG gap that must be escalated before outreach) — do NOT merely say "no flags found" without calling it a gap.
-   - (d) **Grain check (mandatory when the question is period-scoped — "last quarter", "in March", "YoY", "MoM"; independent of the fitness trigger).** From the same hierarchy fetch, apply §11's grain-check heuristic (`TOTAL_*` / `LIFETIME_*` cumulative → cannot answer; `L7D_*` / `L30D_*` / `L90D_*` rolling → **not** "last quarter"; `DATE_KEY` / `DATE_VALUE` / `*_DATE` grain → period-capable). On views/aggregates, also read `sourceStatementText` in `selfAttributes` for the true metric definition. Report a GRAIN_MISMATCH gap if the candidate cannot answer the period the user asked about — even if every other signal is green.
-   This drill-down is expected to cost 2–3 calls on a first-turn fitness prompt — that is within budget and required; do NOT stop at the single combined call if traps remain unconfirmed.
+   - (d) **Grain check + fiscal-term resolution (mandatory when the question is period-scoped — "last quarter", "in March", "YoY", "MoM", "Q2"; independent of the fitness trigger).** Two sub-checks, both required:
+     - **Grain capability:** From the same hierarchy fetch, apply §11's grain-check heuristic (`TOTAL_*` / `LIFETIME_*` cumulative → cannot answer; `L7D_*` / `L30D_*` / `L90D_*` rolling → **not** "last quarter"; `DATE_KEY` / `DATE_VALUE` / `*_DATE` grain → period-capable). On views/aggregates, also read `sourceStatementText` in `selfAttributes` for the true metric definition. Report a GRAIN_MISMATCH gap if the candidate cannot answer the period the user asked about — even if every other signal is green.
+     - **Fiscal-term resolution (column-glossary-first, NEVER agent knowledge).** The agent MUST NOT interpret period terms ("Q2", "quarterly", "last quarter", "FY") using its own calendar knowledge. Resolution order:
+       1. **Column glossary first:** `get_asset_details(segments=[glossary])` on the date/period column (e.g. ORDER_DATE). **On the fast path, this call runs in parallel with step 6(a) — the column UUID is already known from Round 1.** On the slow path, this call waits for step 6(a)'s hierarchy to provide the column UUID and runs in Round 3/step 6(e).
+       2. **Search fallback:** If no fiscal term is linked to the column, search for one: `search_assets(query="fiscal quarter", filterSpec={classType:["com.infa.ccgf.models.governance.BusinessTerm"], assetLifecycle:["Published"]})`. If found → use the definition but flag the column link as missing (TERM_NOT_WIRED, §7.1 step 6e).
+       3. **No term at all:** If neither path yields a fiscal/period term → report as a FISCAL_TERM_MISSING gap. State "no fiscal calendar definition exists in the catalog — confirm the period boundary with the data steward before running." Do NOT fall back to generic calendar quarters (Jan–Mar, Apr–Jun, etc.).
+   - (e) **⟦ROUND 3 — parallel; slow path only⟧ Dimensional-term wiring check (mandatory when a glossary term was resolved by search, not by glossary segment).** On the fast path these checks already ran in Round 2 — skip this step. On the slow path, column UUIDs are now available from step 6(a)'s hierarchy response. Issue ALL wiring checks (fiscal + dimensional) in the same turn. When a dimensional or fiscal term (e.g. "Fiscal Quarter", "EMEA") was found via `search_assets` on glossary terms, verify it is actually **linked** to the candidate table's relevant column by fetching `get_asset_details(segments=[glossary])` on that column (e.g. ORDER_DATE for fiscal terms, SALES_REGION for geo terms). A glossary term found by search but not wired to the column is a **floating definition** — weaker evidence than a linked term. Report the wiring status:
+     - **Wired:** term appears in the column's glossary with `curationStatus: ACCEPTED` → strong: the governed meaning is formally connected to the data.
+     - **Floating:** term exists in the catalog but is not linked to the column → report as a TERM_NOT_WIRED gap. The definition is still the tenant's authoritative meaning (Published > Draft), but the absence of a link means no steward has formally connected it to this data path. State this clearly; do NOT silently treat a floating term as equivalent to a wired one.
+   This drill-down is expected to cost 2–4 calls on a first-turn fitness prompt — that is within budget and required; do NOT stop at the single combined call if traps remain unconfirmed.
 7. Report: assets grouped by resource with certification/rating, presenting connected domains together; when the pre-scan ran, include the fitness signals (meaning, sensitivity, ownership/policy)
 
 ### 7.2 AUTHORITY_COMPARE
@@ -248,7 +310,7 @@ BROAD_DISCOVERY: 3–5 (up to 7 on a first-turn fitness/campaign prompt that tri
 1. For each candidate (max 3): `get_asset_details(segments=[selfAttributes, stakeholdership, glossary])`
 2. **Eligibility gates (hard — must pass to be called authoritative).** Datasets: `certified: true`. All other types (business term, domain, policy): `assetLifecycle: Published`. Datasets carry both signals — check both. A candidate failing its gate is NOT disqualified from the answer, but it cannot win the authority claim; surface it as "best available (not authoritative because [gate that failed])."
 3. **Among gate-passing candidates, present ALL signals as an evidence table.** None are optional — the goal is a defensible comparison, not an argmax. Only invoke the tiebreaker order below when candidates are genuinely indistinguishable on the evidence:
-   - **Governed meaning** — linked glossary term(s) with `curationStatus: ACCEPTED` (INFERRED = partial, REJECTED = zero; a `description` does NOT substitute for a term, per §1)
+   - **Governed meaning** — linked glossary term(s) with `curationStatus: ACCEPTED` (INFERRED = partial, REJECTED = zero; a `description` does NOT substitute for a term, per §2 rule 10)
    - **Stakeholdership** — assigned Data Owner / Data Steward present
    - **Business name** — `core.businessName` populated
    - **Description** — non-empty `description` (documentation, not governance)
@@ -285,7 +347,7 @@ BROAD_DISCOVERY: 3–5 (up to 7 on a first-turn fitness/campaign prompt that tri
    - Single term aligns with column name/datatype → **RELIABLE**
    - Zero glossary terms → **UNDOCUMENTED** (regardless of how intuitive the column name is)
 
-   Even when the verdict is UNDOCUMENTED, still report any DQ/profiling/rating signal found as **PARTIAL trust evidence** (it does NOT upgrade the verdict, per §2.8): e.g. "RATING is UNDOCUMENTED — no glossary term or business name; the only trust signal is a 0% null rate from profiling, which is insufficient for reliance without steward curation." Answer the user's "can I rely on it?" using the quality signals, not just the absence of a term.
+   Even when the verdict is UNDOCUMENTED, still report any DQ/profiling/rating signal found as **PARTIAL trust evidence** (it does NOT upgrade the verdict, per §2 rule 8): e.g. "RATING is UNDOCUMENTED — no glossary term or business name; the only trust signal is a 0% null rate from profiling, which is insufficient for reliance without steward curation." Answer the user's "can I rely on it?" using the quality signals, not just the absence of a term.
 
 4. **Response structure (output in this exact order):**
 
@@ -361,7 +423,7 @@ CORRECT next action: "Link a 'Product Rating' glossary term to formalize the mea
 
 1. `get_asset_details(segments=[hierarchy, neighborhood, selfAttributes])` — one call
 2. Read: FK/PK → source tables, RelatedTo → upstream, sourceStatementText → SQL
-3. **Feeder search (when neighborhood shows no lineage — expected, since DataFlow is excluded, §4):** do NOT stop at "not documented." Actively `search_assets` for candidate upstream feeders by name — the FK-referenced source tables, and any staging / aggregate / job asset whose name echoes the fact (e.g. `*sales*`, `*aggregate*`, `orders*`, mapping/mapplet names). Then `get_asset_details(segments=[selfAttributes])` on the best match to read its build logic/SQL.
+3. **Feeder search (when neighborhood shows no lineage — expected, since DataFlow is excluded, §4.6):** do NOT stop at "not documented." Actively `search_assets` for candidate upstream feeders by name — the FK-referenced source tables, and any staging / aggregate / job asset whose name echoes the fact (e.g. `*sales*`, `*aggregate*`, `orders*`, mapping/mapplet names). Then `get_asset_details(segments=[selfAttributes])` on the best match to read its build logic/SQL.
 4. Only if no feeder is discoverable by name: "derivation not documented in the catalog — confirm with steward"
 
 ### 7.10 ROOT_CAUSE
@@ -407,7 +469,7 @@ Primarily synthesis from conversation state. Only call tools if field analysis i
 2. Add conditions: exclude RTBF=true, obtain consent for contact fields, don't segment on forbidden
 3. Report: structured guide (CAN use / MUST NOT use / needs resolution / prerequisites)
 4. **Restate the gate explicitly:** end with the applicable policy (name, or "implied by PII/special-category classification") AND the required approval/owner — e.g. "Gated on: marketing-use policy [implied by PII classification] + steward approval; no owner is assigned, so escalate before sending." A safe-usage answer that omits the policy + approval gate is incomplete.
-5. **When the ask is Data-Q&A (counts, ranked lists, anti-joins):** do NOT stop at "cannot run it." Two paths: (a) if the actual data should be read, hand off the resolved asset to the `data-exploration-agent` MCP (§4.6, "Reading actual data") — remember `data_explore` requires `external_id`/`external_ids` or it returns empty frames silently; (b) otherwise deliver the precise recipe — the governed table(s), the exact join/anti-join key(s), and the SQL that WOULD answer it — plus the caveats (safe fields, RTBF/consent exclusions). The executed result or the recipe IS the deliverable.
+5. **When the ask is Data-Q&A (counts, ranked lists, anti-joins):** do NOT stop at "cannot run it." Two paths: (a) if the actual data should be read, hand off the resolved asset to the `data-exploration-agent` MCP (§4.7, "Reading actual data") — remember `data_explore` requires `external_id`/`external_ids` or it returns empty frames silently; (b) otherwise deliver the precise recipe — the governed table(s), the exact join/anti-join key(s), and the SQL that WOULD answer it — plus the caveats (safe fields, RTBF/consent exclusions). The executed result or the recipe IS the deliverable.
 
 ### 7.15 COMPLIANCE_FLAG
 
@@ -419,6 +481,8 @@ Primarily synthesis from conversation state. Only call tools if field analysis i
    - None found → "No compliance flags — escalate before campaign" (NO_COMPLIANCE_FLAG gap)
 
 ### 7.16 Worked illustration — period-scoped BROAD_DISCOVERY (wasteful vs corrected)
+
+> **Staleness note:** this illustration predates the compound-phrase gate (§7.1 step 2), filter-first escalation (§7.1 step 3), fast/slow path model (§4.5), and wiring checks (§7.1 step 6e). The "corrected path" below still demonstrates the right *shape* (search → aggregations → hierarchy → glossary) and anti-patterns, but step 2 violates the compound-phrase gate and the flow omits escalation and wiring. For the current prescriptive flow, follow §7.1 steps 1–7 directly.
 
 Example question, over a messy multi-vertical tenant: *"What's our customer revenue in EMEA last quarter?"*
 
@@ -460,6 +524,9 @@ Example question, over a messy multi-vertical tenant: *"What's our customer reve
 | glossary reveals hidden sensitivity | HIDDEN_SENSITIVITY |
 | column grain doesn't match asked period | GRAIN_MISMATCH |
 | NumberOfRows: 0 (empty or unprofiled) | EMPTY_OR_UNPROFILED |
+| glossary term found by search but not linked to the column | TERM_NOT_WIRED |
+| period-scoped question but no fiscal/period business term in catalog | FISCAL_TERM_MISSING |
+| asset found only after dropping classType filter (exists but not the expected type) | UNTYPED |
 
 ### Reporting gaps (this skill is read-only)
 
@@ -487,7 +554,7 @@ DISCOVERY STATE:
 
 ## 10. Response Format
 
-Every response MUST follow this three-part structure in order:
+Every response MUST follow this four-part structure in order:
 
 ### Part 1: Verdict (always first — the user's takeaway)
 
@@ -558,14 +625,14 @@ Concrete, actionable steps:
 - **Size:** probe=5, discovery=10, pagination=20 max. Never >20.
 - **Free aggregations:** every search returns `origin`, `resourceType`, and `assetLifecycle` buckets even with NO `aggregationSpec` — read them to route the next call before paying for another search.
 - **Buckets vs. size:** aggregation buckets are complete at any `size`, and `total_matches` is accurate for `size ≥ 1`. Do NOT set `size=0` to "just get counts" — use `size=1` for complete buckets + an accurate total + one sample row.
-- **Compound phrases:** Do NOT search multi-word compound phrases as one query (they return 0 results). Instead search individual meaningful terms, or use NL mode for the full phrase.
+- **Compound phrases (hard rule — see §7.1 step 2 gate):** Do NOT search multi-word compound phrases as a single KEYWORD query — they return 0 results. Either split into individual single-word KEYWORD searches (each run in parallel) or route the full phrase to NL mode. This is enforced as a mandatory gate in the strategy, not a best practice.
 - **Grain check on column names (cheapest disqualifier available).** When the user's question is period-scoped ("last quarter", "in March", "year on year", "MoM", "YoY"), read the top candidate's column names — from the hierarchy segment — and grain-check before committing:
   - `TOTAL_*`, `LIFETIME_*`, `*_TO_DATE` → cumulative measures. **Cannot answer a period-scoped question.**
   - `L7D_*`, `L30D_*`, `L90D_*` → rolling windows relative to `CURRENT_DATE()`. **`L90D` is NOT "last quarter"** — it's the trailing 90 days ending today. Column descriptions sometimes claim these "support quarterly reviews"; read the definition, not the marketing.
   - `DATE_KEY` / `DATE_VALUE` / `*_DATE` grain columns → sum to any calendar or fiscal period. **This is what a period-scoped question needs.**
   For views/aggregates, also read `sourceStatementText` in `selfAttributes` — it carries the actual metric definition (status filters, currency conversion, join path) that the user must reproduce if they query source tables directly.
 - **`NumberOfRows: 0` is a flag, not silence.** From `selfAttributes` on a Dataset it means empty OR never profiled — you can't tell which. Report it as a gap; do NOT recommend the asset without noting this.
-- **`certified: true` on the wrong class returns silently empty.** Certification is dataset-only (§1.3). A `certified:true` probe on `BusinessTerm`, `Domain`, `Policy`, `Column` etc. returns zero not because the tenant has a gap but because the filter itself excludes those classes. Before reporting "no certified match," check what class you were probing; on non-datasets re-run with `assetLifecycle:["Published"]` as the trust signal.
+- **`certified: true` on the wrong class returns silently empty.** Certification is dataset-only (§1 principle 3). A `certified:true` probe on `BusinessTerm`, `Domain`, `Policy`, `Column` etc. returns zero not because the tenant has a gap but because the filter itself excludes those classes. Before reporting "no certified match," check what class you were probing; on non-datasets re-run with `assetLifecycle:["Published"]` as the trust signal.
 - **Never bare `query="*"` with `certified:true` for a topic-scoped search.** With no query term the ranking is arbitrary and the result set is paginated — the asset you want can sit outside the first page. Pair the certification filter WITH your search terms. The one exception is the cold-start census (§11 router), where `*` IS the question.
 - **Source expansion:** When you find a relevant asset, check its origin/resource — other assets in the same source likely form a connected domain. Search the same origin to find them.
 
@@ -573,8 +640,7 @@ Concrete, actionable steps:
 
 ## 12. Handling Ambiguity
 
-- KEYWORD empty → do NOT retry with another KEYWORD compound phrase. Switch to NL mode with the user's original business question, or broaden by dropping classType filters.
-- NL empty → do NOT retry with an equally abstract NL rephrasing. Drop the certified filter first (a real gap, not a search bug), then fall back to KEYWORD on concrete nouns from the question. If still empty, report the tenant has no match — do not invent one.
+- **Zero results → follow §7.1 step 3 escalation order.** Filter-first: if `certified:true` or `classType` was applied, retry the SAME mode without that filter before switching modes (surfaces UNCERTIFIED/UNTYPED gaps). Mode switch: only after filter-drop also returned zero — KEYWORD zero → NL; NL zero → KEYWORD on concrete nouns. Do NOT retry a compound phrase as another KEYWORD compound (see §7.1 step 2 gate). If still empty after both, report honestly.
 - Hundreds of matches → narrow via aggregation buckets, or add `certified:true` filter to surface the trusted subset
 - Multiple terms → list all, flag conflicts
 - No certified → say so, offer best uncertified
@@ -614,7 +680,9 @@ You are a business data assistant plugged into the Informatica IDMC catalog and 
 1. Interpret the question in business terms.
 2. Resolve every phrase — metric, dimension, region, fiscal period — through the catalog MCP. Never define terms from your own knowledge.
 3. Resolve fiscal calendar and geography from the asking user's own context in the catalog, not calendar defaults.
-4. If a phrase has multiple catalog matches, ASK ONCE with 2–3 candidates and stop.
+4. If a phrase has multiple catalog matches, apply the measure-resolution heuristic before asking:
+   - **Clear default:** the catalog description (technical or business) explicitly positions one match as the standard/default measure for the user's business phrase (e.g. "booked revenue" for "sales", "headcount" for "team size") and no conflicting glossary term exists on the alternative → **resolve to the default**, surface the alternative as a switchable option ("Using NET_SALES — your catalog's booked-revenue measure. Say 'gross' to switch."). Do NOT block the user with a question.
+   - **Genuinely ambiguous:** descriptions don't clearly rank one over the other, OR conflicting glossary terms exist, OR the measures serve the same business concept with materially different scope (e.g. two "revenue" definitions from different stewards) → **ASK ONCE** with 2–3 candidates and stop.
 5. If a phrase has no catalog match, banner as "Assisted · not from your catalog" and offer to route to a steward before running.
 6. Present the result using the answer shape in §14.3.
 7. Emit the structured response contract in §14.4 alongside the natural-language answer.
@@ -761,3 +829,4 @@ For each failure mode, name the owner and offer a next step. Never respond with 
 - Name the owner and offer a next step on any failure.
 - Honor the asking user's identity and row-level security.
 - Show the carry-forward strip on follow-ups; show the reset on topic change.
+
