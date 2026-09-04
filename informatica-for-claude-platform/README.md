@@ -1,6 +1,6 @@
-# informatica-in-claude
+# Informatica for Claude Platform
 
-Trusted, catalog-grounded data discovery for Informatica IDMC in Claude Code.
+Governed catalog discovery and data Q&A for Informatica IDMC, across the entire enterprise data estate, in Claude Code and Claude CoWork.
 
 This plugin targets two Informatica IDMC capability areas — **CDGC** (Cloud Data Governance and Catalog) and **Claire** (Informatica's GenAI/AI engine). Today, CDGC is covered by one real, substantive skill (catalog discovery).
 
@@ -14,7 +14,7 @@ Install via the `claude-plugins-official` marketplace.
    ```
 2. **Install the plugin.**
    ```
-   /plugin install informatica-in-claude@claude-plugins-official
+   /plugin install informatica-for-claude-platform@claude-plugins-official
    ```
 3. **Restart Claude Code / reload plugins** to pick up the manifest, MCP server, and skills.
 
@@ -33,7 +33,7 @@ The `catalog-and-data-discovery` skill activates automatically on data questions
 
 - **Verify:** Confirm the plugin is loaded by checking that `catalog-and-data-discovery` appears in Claude Code's Skills list and that `informatica-catalog-discovery` and `informatica-data-exploration` appear in the active MCP servers.
 - **Update:** `/plugin marketplace update claude-plugins-official`, reinstall/upgrade the plugin, and then restart Claude Code / reload plugins.
-- **Uninstall:** `/plugin uninstall informatica-in-claude@claude-plugins-official` and then restart.
+- **Uninstall:** `/plugin uninstall informatica-for-claude-platform@claude-plugins-official` and then restart.
 
 ## What's Included
 

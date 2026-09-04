@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-This repo is a **placeholder scaffold** for a Claude Code plugin (`informatica-in-claude`, see `.claude-plugin/plugin.json`) targeting Informatica IDMC's two capability areas:
+This repo is a **placeholder scaffold** for a Claude Code plugin (`informatica-for-claude-platform`, see `.claude-plugin/plugin.json`) targeting Informatica IDMC's two capability areas:
 
 - **CDGC** (Cloud Data Governance and Catalog)
 - **Claire** (Informatica's GenAI/AI engine)

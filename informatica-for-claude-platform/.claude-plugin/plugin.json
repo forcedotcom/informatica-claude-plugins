@@ -1,0 +1,8 @@
+{
+  "name": "informatica-for-claude-platform",
+  "version": "1.0.0",
+  "description": "Informatica plugin for Claude Platform (Claude Code & Claude CoWork) — governed catalog discovery, data Q&A, powered by Informatica's Data catalog and Governance to understand and evaluate enterprise data assets without bypassing governance. Discover, Explore, Enrich, Govern and Manage Data Assets across the entire enterprise estate through natural language",
+  "author": {
+    "name": "informatica"
+  }
+}

@@ -8,6 +8,6 @@ This repo has no runtime dependencies to speak of — it is a Claude Code plugin
 container consisting of JSON manifests, MCP server configuration, and Markdown
 skill definitions (see [`CLAUDE.md`](CLAUDE.md)). The main security-relevant
 surface is the `.mcp.json` MCP server declarations inside each plugin
-(`informatica-in-claude/.mcp.json` at the time of writing) — review any
+(`informatica-for-claude-platform/.mcp.json` at the time of writing) — review any
 change to a server URL or credential/auth configuration with extra care, and
 flag it through the link above if you believe it introduces a vulnerability.
