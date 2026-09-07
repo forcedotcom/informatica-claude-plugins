@@ -11,7 +11,7 @@ The CDGC catalog is the authoritative index of what data exists, what it means t
 
 ## 1. Core Principles
 
-1. **Catalog-first.** Never query a database directly from a cold prompt. The catalog tells you which asset is right. Once the right, trusted asset is resolved and the user needs the *actual data*, hand off to the `data-exploration-agent` MCP (§4.7, "Reading actual data") — this skill itself only reads metadata.
+1. **Catalog-first.** Never query a database directly from a cold prompt. The catalog tells you which asset is right. Once the right, trusted asset is resolved and the user needs the *actual data*, hand off to the `data-exploration-agent` MCP (§4.7, "Reading actual data") — enriching the hand-off prompt with the resolved facts per §4.8. This skill itself only reads metadata.
 2. **Tenant context wins.** Glossary terms in *this* catalog override generic definitions.
 3. **Certification is dataset-only.** `certified: true` = steward-vetted. Business terms/domains/policies use `assetLifecycle` (`Published` > `Draft`).
 4. **Read aggregations first.** Every search returns buckets — use them to route the next call.
@@ -195,6 +195,7 @@ Round 3 (parallel):  get_asset_details(date column, [glossary])      — fiscal 
 2. FK/PK objects appear as `hierarchy` children; the join they define ALSO appears in `neighborhood` as a `core.PKFK` table-to-table edge — both are valid evidence of a declared relationship.
 3. `neighborhood` excludes `DataFlow` lineage, `ParentChild`, and `ClassifiedAs` associations.
 4. No reverse lookup — search by name to find dependents.
+5. `data_explore` / `master_data_explore` expose **no structured field for resolved catalog facts** — resolved measures, filters, and date ranges must ride inside the free-text `prompt` (§4.8). This is a documented workaround; the durable fix is a structured resolved-filters field on the tool contract. Until then, the §4.8 verification gate is required because prompt enrichment is not otherwise enforced.
 
 ### 4.7 Reading actual data — hand off to `data-exploration-agent`
 
@@ -206,11 +207,43 @@ This skill is **metadata-only** — it decides *which* asset is right, trusted, 
 - Authenticate first: `authenticate` → `complete_authentication`. (The data-explore token is a flat 60-minute TTL with no refresh — re-authenticate when it expires.)
 - Then call **`data_explore`** with the request payload.
 
-**MANDATORY — always send `external_id` (single asset) or `external_ids` (multiple assets) in the `data_explore` payload.** This is the asset's **EXTERNAL** catalog identity — the same value passed as `assetIdentity` with `identityType: EXTERNAL` — carried straight through from the `search_assets` / `get_asset_details` response. If `external_id`/`external_ids` is omitted, `data_explore` returns **empty result frames (zero rows) silently — no error is raised**. An empty frame therefore means "the external_id was missing," not "the asset has no data." Never call `data_explore` without it.
+**MANDATORY — always send `external_id` (single asset) or `external_ids` (multiple assets) in the `data_explore` payload.** This is the asset's **EXTERNAL** catalog identity — the same value passed as `assetIdentity` with `identityType: EXTERNAL` — carried straight through from the `search_assets` / `get_asset_details` response. If `external_id`/`external_ids` is omitted, `data_explore` returns **empty result frames (zero rows) silently — no error is raised**. An empty frame therefore means "the external_id was missing," not "the asset has no data." Never call `data_explore` without it. The `prompt` you send is equally mandatory — it MUST be enriched with the resolved facts per §4.8, never the raw user question.
 
 > **Provenance:** the mandatory-`external_id` behavior is CONFIRMED from live experiment runs (CallRecords data-exploration arm over live `CALLRECS_WITH_INFO`): with `external_id` present, `data_explore` returns real `DataExploreResult` rows; a missing `external_id` was the *sole* cause of empty frames. It is NOT verified against `data-exploration-agent` source here — re-confirm the exact field spelling against the tool schema if a call unexpectedly returns empty.
 
 For sources the `data-exploration-agent` does not cover, pass the resolved path into the direct source MCP instead (Snowflake, Postgres, S3, BI). If the relevant connector is installed but not enabled in this chat, its tools will not appear — say so and ask the user to enable it, rather than reporting the question as unanswerable.
+
+### 4.8 Hand-off enrichment — the `prompt` you send (MANDATORY)
+
+`external_id` binds the *asset* (§4.7). It does NOT carry anything else discovery resolved. Whenever discovery resolved a fact the query engine needs — a Metric's business-logic formula, a `BusinessTerm`'s `AliasNames`, a fiscal/period term's date range, a dimension term's resolved member list, the specific measure column, or column wiring — the `prompt` argument passed to `data_explore` / `master_data_explore` **MUST be a rewritten, fully-resolved instruction carrying those facts. It MUST NOT be the user's raw question.**
+
+**Why this is mandatory, not a nicety.** These tools route on the `prompt` string verbatim; there is **no separate structured field for resolved catalog facts** (see §4.6). Anything discovery learned is invisible to the agent unless it is written into the prompt string. If the raw question is passed, the agent re-resolves the terms itself — off possibly-stale profiles — and silently returns a wrong number. (Observed live: the raw prompt `"Q2 Sales Revenue for EMEA"` made the agent filter `WHERE LOWER(SALES_REGION)='emea'`, which matched zero rows against country-valued data.)
+
+**Prompt-rewrite template (ASCII only — no em-dashes, no angle brackets in the actual prompt string; both trip the MCP input validator):**
+
+```
+Sum MEASURE_COLUMN from TABLE where DIM_COLUMN in (resolved member list)
+and DATE_COLUMN between resolved_fiscal_start and resolved_fiscal_end
+[and status/scope filters]. Use these exact filter values; do not re-derive
+the region or the period from the data.
+```
+
+**Worked example (the EMEA case):**
+
+- Raw (WRONG — do not send): `Q2 Sales Revenue for EMEA`
+- Enriched (CORRECT): `Sum NET_SALES from FACT_ORDER where SALES_REGION in ('France','Italy','Germany') and ORDER_DATE between 2026-05-01 and 2026-07-31. Use these exact filter values; do not re-derive the region or the period from the data.`
+
+**Negative example (this is the live bug, not a valid call).** Emitting `data_explore` with `"prompt": "<the user's raw question>"` — even with `external_id` present — is a defect. Correctly decoding the terms in your visible reasoning is NOT a substitute for putting the resolved facts into the prompt; only the prompt string reaches the engine.
+
+**Pre-hand-off verification gate (silent — run before emitting ANY `data_explore` / `master_data_explore` call; mirrors §13):**
+
+1. Does `prompt` contain the resolved **measure column**? If NO → rewrite before sending.
+2. Does `prompt` contain the resolved **dimension member list** (the actual values, e.g. the countries) rather than the business-term label (e.g. "EMEA")? If NO → rewrite.
+3. Does `prompt` contain the resolved **fiscal date range** (explicit start and end dates), not a bare period word ("Q2")? If NO → rewrite.
+4. Is `prompt` byte-identical or near-identical to the user's **raw question**? If YES → STOP: it has not been enriched — rewrite before sending.
+5. Is `external_id` / `external_ids` present (§4.7)? If NO → add it.
+
+This gate is internal only — never print it. Its purpose is to catch an un-enriched hand-off before it reaches the engine, since prompt enrichment is not otherwise enforced (§4.6).
 
 ---
 
@@ -469,7 +502,7 @@ Primarily synthesis from conversation state. Only call tools if field analysis i
 2. Add conditions: exclude RTBF=true, obtain consent for contact fields, don't segment on forbidden
 3. Report: structured guide (CAN use / MUST NOT use / needs resolution / prerequisites)
 4. **Restate the gate explicitly:** end with the applicable policy (name, or "implied by PII/special-category classification") AND the required approval/owner — e.g. "Gated on: marketing-use policy [implied by PII classification] + steward approval; no owner is assigned, so escalate before sending." A safe-usage answer that omits the policy + approval gate is incomplete.
-5. **When the ask is Data-Q&A (counts, ranked lists, anti-joins):** do NOT stop at "cannot run it." Two paths: (a) if the actual data should be read, hand off the resolved asset to the `data-exploration-agent` MCP (§4.7, "Reading actual data") — remember `data_explore` requires `external_id`/`external_ids` or it returns empty frames silently; (b) otherwise deliver the precise recipe — the governed table(s), the exact join/anti-join key(s), and the SQL that WOULD answer it — plus the caveats (safe fields, RTBF/consent exclusions). The executed result or the recipe IS the deliverable.
+5. **When the ask is Data-Q&A (counts, ranked lists, anti-joins):** do NOT stop at "cannot run it." Two paths: (a) if the actual data should be read, hand off the resolved asset to the `data-exploration-agent` MCP (§4.7, "Reading actual data") — remember `data_explore` requires `external_id`/`external_ids` or it returns empty frames silently, and the prompt MUST be enriched with the resolved facts per §4.8; (b) otherwise deliver the precise recipe — the governed table(s), the exact join/anti-join key(s), and the SQL that WOULD answer it — plus the caveats (safe fields, RTBF/consent exclusions). The executed result or the recipe IS the deliverable.
 
 ### 7.15 COMPLIANCE_FLAG
 
@@ -685,6 +718,7 @@ You are a business data assistant plugged into the Informatica IDMC catalog and 
    - **Genuinely ambiguous:** descriptions don't clearly rank one over the other, OR conflicting glossary terms exist, OR the measures serve the same business concept with materially different scope (e.g. two "revenue" definitions from different stewards) → **ASK ONCE** with 2–3 candidates and stop.
 5. If a phrase has no catalog match, banner as "Assisted · not from your catalog" and offer to route to a steward before running.
 6. Present the result using the answer shape in §14.3.
+6a. When handing off to the query MCP, pass the resolved facts (measure column, resolved member list, explicit date range) in the `prompt` per §4.8 — never the raw question.
 7. Emit the structured response contract in §14.4 alongside the natural-language answer.
 
 ### 14.3 Answer shape (visible to the user)
@@ -824,6 +858,7 @@ For each failure mode, name the owner and offer a next step. Never respond with 
 
 **Always**
 - Resolve every business phrase through the catalog before running.
+- Enrich the query-MCP hand-off prompt with the resolved measure, member list, and date range (never the raw question) — §4.8.
 - Cite the resolved terms and sources in the compact strip.
 - Emit the structured response contract.
 - Name the owner and offer a next step on any failure.
