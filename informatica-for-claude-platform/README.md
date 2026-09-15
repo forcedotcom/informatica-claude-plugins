@@ -6,6 +6,8 @@ This plugin targets two Informatica IDMC capability areas — **CDGC** (Cloud Da
 
 Install via the `claude-plugins-official` marketplace.
 
+**Privacy Policy:** [https://www.informatica.com/privacy-policy.html](https://www.informatica.com/privacy-policy.html)
+
 ## Quick Start
 
 1. **Add the marketplace.**
